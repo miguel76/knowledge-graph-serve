@@ -1,0 +1,34 @@
+# Use GraphDB as the triple store:
+#   docker compose -f compose.yaml -f compose.graphdb.yaml up -d
+# The sync service creates the repository (GRAPHDB_REPOSITORY, default "kg") if missing and
+# replaces its content in a single transaction for each new release.
+# GraphDB 11 needs a license file, also for the free edition (free licenses are available
+# from Ontotext on registration): put it in ./graphdb.license or set GRAPHDB_LICENSE.
+# The GraphDB Workbench is published on 127.0.0.1:7200 only (use an SSH tunnel to reach it).
+
+services:
+  graphdb:
+    image: ontotext/graphdb:${GRAPHDB_VERSION:-11.5.2}
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:${GRAPHDB_PORT:-7200}:7200"
+    environment:
+      GDB_JAVA_OPTS: ${GRAPHDB_JAVA_OPTS:--Xmx4g}
+    volumes:
+      - ${GRAPHDB_DATA_PATH:-./graphdb-data}:/opt/graphdb/home
+      - ${GRAPHDB_LICENSE:-./graphdb.license}:/opt/graphdb/dist/conf/graphdb.license:ro
+
+  store:
+    environment:
+      BACKEND: graphdb
+      GRAPHDB_URL: http://graphdb:7200
+    depends_on:
+      - graphdb
+
+  linked-data:
+    environment:
+      SPARQL_ENDPOINT: http://graphdb:7200/repositories/${GRAPHDB_REPOSITORY:-kg}
+
+  web:
+    environment:
+      SPARQL_UPSTREAM: http://graphdb:7200/repositories/${GRAPHDB_REPOSITORY:-kg}

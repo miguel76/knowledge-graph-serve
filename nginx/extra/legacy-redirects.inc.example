@@ -1,0 +1,5 @@
+# Example: the knowledge graph used to live under /hacid-cs-kg.
+# 308 (not 301) so that POSTed SPARQL queries keep their method and body.
+location ~ ^/hacid-cs-kg(?<legacy_rest>/.*)?$ {
+    return 308 /climate-change-kg$legacy_rest$is_args$args;
+}
