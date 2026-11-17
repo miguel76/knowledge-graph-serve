@@ -5,6 +5,7 @@
   serving; then the read-only server is restarted on the new store (blue/green swap).
 * ``graphdb`` (*remote*): a GraphDB (or any RDF4J) server. Data are replaced inside one
   RDF4J transaction, so queries see either the old or the new release.
+* ``qlever`` (*managed*): QLever, for large graphs and analytic queries; see ``qlever.py``.
 * ``gsp`` (*remote*): any store implementing the SPARQL 1.1 Graph Store Protocol and Update
   (e.g. Apache Jena Fuseki). Data are dropped and re-posted (not atomic).
 """
@@ -330,4 +331,8 @@ def create(name: str, data_dir: Path) -> Backend:
         return GraphDBBackend()
     if name in ("gsp", "fuseki"):
         return GSPBackend()
-    raise SystemExit(f"Unknown BACKEND {name!r} (expected oxigraph, graphdb or gsp)")
+    if name == "qlever":
+        from .qlever import QLeverBackend
+
+        return QLeverBackend(data_dir)
+    raise SystemExit(f"Unknown BACKEND {name!r} (expected oxigraph, qlever, graphdb or gsp)")

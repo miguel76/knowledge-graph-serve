@@ -1,6 +1,7 @@
 # Default stack: Oxigraph (managed by the sync service) + linked-data server + nginx.
 # Configure it with a .env file (see .env.example, or run `kgserve init <record>`).
-# Other triple stores: add `-f compose.graphdb.yaml` or `-f compose.fuseki.yaml`.
+# Other triple stores: add `-f compose.qlever.yaml`, `-f compose.graphdb.yaml` or
+# `-f compose.fuseki.yaml`.
 # HTTPS with Let's Encrypt: add `-f compose.tls.yaml`.
 
 x-kgserve-env: &kgserve-env
@@ -25,6 +26,7 @@ services:
   # Resource pages and RDF serialisations for the IRIs of the knowledge graph.
   linked-data:
     <<: *kgserve-env
+    build: .
     image: kgserve:latest
     command: ["ld"]
     restart: unless-stopped

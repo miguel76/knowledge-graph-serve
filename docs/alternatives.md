@@ -72,20 +72,34 @@ Query times in ms, first run / median of the next 3 (Fuseki: median only):
 * The planner can be sensitive to query shape. A label lookup joining two `VALUES`
   blocks took 4.8 s, against 8 ms when rewritten with `UNION`.
 
-### QLever: for large graphs and analytics
+### QLever: for large graphs and analytics (`compose.qlever.yaml`)
 
 * 10–75× faster than Oxigraph on aggregations and scans on a cold run, and far more on
-  repeated queries thanks to its result cache. It also has the smallest index (82 MB). Built for graphs the size of Wikidata (billions of triples).
-* Its offline index build also fits the release-reload model. A QLever backend would
-  follow the same blue/green pattern as Oxigraph.
+  repeated queries thanks to its result cache. It also has the smallest index (82 MB).
+  Built for graphs the size of Wikidata (billions of triples).
+* Its offline index build fits the release-reload model; it is supported as a managed
+  backend (`kgserve/qlever.py`):
+  * Inputs stream through named pipes. Compressed files are decompressed on the fly, and
+    formats QLever does not read (RDF/XML, JSON-LD, TriG, N3) are converted to N-Quads by
+    `oxigraph convert`. QLever reads only N-Triples, Turtle and N-Quads, and no gzip. No
+    uncompressed copy is written to disk. Blank nodes stay scoped per file.
+  * The new index is served on an internal port and verified (count, hash IRIs) with an
+    access token known only to the sync process. The token lifts the public query
+    timeout; without it the server refuses updates (403).
+  * A small TCP proxy holds the public port and switches to the new server once it
+    answers, then stops the old one when its connections have ended. The swap has no
+    downtime even when a large index takes minutes to load: 143 SPARQL and linked-data
+    requests during a reload of the CCKG all succeeded. A crashed server is restarted
+    automatically.
+  * On the CCKG the whole cycle (index build from the pipe, start, verification) took
+    about 15 s after download.
 * Slower on the linked-data description query (UNION over blank-node paths): 170–570 ms,
-  against 2–5 ms on Oxigraph. Still acceptable.
-* Reads only N-Triples, Turtle and N-Quads (other formats would need converting first:
-  `oxigraph convert` is in the image). The image is Ubuntu with Python tooling, so it is
-  heavier to embed.
-* **Recommendation:** add it as a second managed backend when a knowledge graph grows
-  beyond a few hundred million triples, or when analytic queries matter more than
-  resource lookups.
+  against 2–5 ms on Oxigraph. Linked-data pages take 0.15–0.6 s instead of 10–130 ms.
+* Its union default graph is a set: a triple stored in two named graphs counts once
+  (e.g. 853,031 `rdf:type` triples on the CCKG, against 859,742 on Oxigraph, which
+  returns one result per graph).
+* **Recommendation:** use it when a knowledge graph grows beyond a few hundred million
+  triples, or when analytic queries matter more than resource lookups.
 
 ### Apache Jena Fuseki
 
@@ -149,6 +163,7 @@ Query times in ms, first run / median of the next 3 (Fuseki: median only):
 * Default stack: **Oxigraph** (managed by the sync, blue/green reloads) + **kgserve ld** +
   nginx. It needs no license, ships as one image plus nginx, and loads the CCKG in under a
   minute.
-* For very large graphs or heavy analytics: add a **QLever** managed backend (follow-up).
+* For very large graphs or heavy analytics: **QLever** (`compose.qlever.yaml`), also managed
+  by the sync, with zero-downtime swaps.
 * Keep **GraphDB** (supported) where its inference or connectors are needed and a
   license is available.

@@ -148,8 +148,18 @@ The state (loaded version, statement count, errors, next check) is in
 
 ### Choosing another triple store
 
-Oxigraph is the default (see [docs/alternatives.md](docs/alternatives.md) for why). The
-sync also works with stores it does not manage:
+Oxigraph is the default (see [docs/alternatives.md](docs/alternatives.md) for why).
+
+* **QLever**, for large graphs and fast analytic queries:
+  `docker compose -f compose.yaml -f compose.qlever.yaml up -d --build`. Like Oxigraph it
+  is managed by the sync: each release is indexed offline (formats QLever does not read
+  are converted on the fly). The public port then switches to the new server once it
+  answers, so releases are swapped without downtime. Options: `QLEVER_MEMORY` (query
+  memory, default `4G`), `QLEVER_TIMEOUT` (default `60` s), `QLEVER_QUERY_THREADS`
+  (default `4`), `QLEVER_INDEX_MEMORY`, `QLEVER_INDEX_SETTINGS` (path, inside the container, of a
+  JSON settings file for `qlever-index`), `QLEVER_SERVER_ARGS` (extra `qlever-server` arguments).
+
+The sync also works with stores it does not manage:
 
 * **GraphDB**: `docker compose -f compose.yaml -f compose.graphdb.yaml up -d`. The
   repository is created if missing and each release replaces its content in one RDF4J
@@ -224,5 +234,7 @@ python bench/bench.py http://localhost:8080/climate-change-kg/sparql
 ```
 
 Code layout: `kgserve/zenodo.py` (Zenodo API), `kgserve/rdffiles.py` (formats and
-archives), `kgserve/backends.py` (stores), `kgserve/sync.py` (daemon),
-`kgserve/ld/` (linked-data server). The only dependency is `rdflib`.
+archives), `kgserve/backends.py` (stores), `kgserve/qlever.py` and `kgserve/proxy.py` (QLever
+backend), `kgserve/sync.py` (daemon),
+`kgserve/ld/` (linked-data server). The only dependency is `rdflib`, used by the
+linked-data server and `init`; the sync itself needs only the standard library.
