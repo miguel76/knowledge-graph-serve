@@ -1,0 +1,36 @@
+# Use Apache Jena Fuseki (TDB, union default graph, Lucene text index on labels) as the
+# triple store:
+#   docker compose -f compose.yaml -f compose.fuseki.yaml up -d
+# Only the query service is exposed through nginx; Fuseki itself is not published.
+# Note: with this backend a new release is loaded in place (DROP ALL, then POST), so for
+# the duration of the load the endpoint serves partial data.
+
+services:
+  fuseki:
+    image: secoresearch/fuseki:${FUSEKI_VERSION:-6.2.0}
+    restart: unless-stopped
+    environment:
+      ADMIN_PASSWORD: ${FUSEKI_ADMIN_PASSWORD:-change-me}
+      ENABLE_DATA_WRITE: "true"
+      ENABLE_UPDATE: "true"
+      QUERY_TIMEOUT: ${FUSEKI_QUERY_TIMEOUT:-60000}
+      JAVA_OPTIONS: ${FUSEKI_JAVA_OPTIONS:--Xmx4g}
+    volumes:
+      - ${FUSEKI_DATA_PATH:-./fuseki-data}:/fuseki-base/databases
+
+  store:
+    environment:
+      BACKEND: gsp
+      GSP_DATASET_URL: http://fuseki:3030/ds/data
+      GSP_UPDATE_URL: http://fuseki:3030/ds/update
+      GSP_QUERY_URL: http://fuseki:3030/ds/sparql
+    depends_on:
+      - fuseki
+
+  linked-data:
+    environment:
+      SPARQL_ENDPOINT: http://fuseki:3030/ds/sparql
+
+  web:
+    environment:
+      SPARQL_UPSTREAM: http://fuseki:3030/ds/sparql

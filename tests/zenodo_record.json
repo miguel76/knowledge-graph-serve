@@ -1,0 +1,53 @@
+{
+ "id": 24305089,
+ "conceptrecid": "24305088",
+ "doi": "10.5281/zenodo.24305089",
+ "conceptdoi": "10.5281/zenodo.24305088",
+ "updated": "2026-11-17T12:07:20.647726+00:00",
+ "metadata": {
+  "title": "Climate Change Knowledge Graph (CCKG)",
+  "version": "1.0.0",
+  "publication_date": "2026-11-15",
+  "description": "<div class=\"epitaxy-document-chunk\">\n<p>The <strong>Climate Change Knowledge Graph (CCKG)</strong> describes, as linked data, the climate information used by climate services:</p>\n<ul>\n<li>the climate variables (CF standard names, MIP variables of the CMOR tables, climate indices);</li>\n<li>the climate models and the simulations of CMIP5 and CORDEX-CMIP5, with their datasets;</li>\n<li>the UKCP18 d",
+  "license": {
+   "id": "cc-by-4.0"
+  },
+  "creators": [
+   {
+    "name": "Ceriani, Miguel",
+    "affiliation": "Institute of Cognitive Sciences and Technologies",
+    "orcid": "0000-0002-5074-2112"
+   },
+   {
+    "name": "Ciroku, Fiorela",
+    "affiliation": "Institute of Cognitive Sciences and Technologies",
+    "orcid": "0000-0002-3885-6280"
+   }
+  ]
+ },
+ "files": [
+  {
+   "id": "6346e246-0dfe-4be5-9047-a1edaa717b43",
+   "key": "kg.nq.gz",
+   "size": 35628112,
+   "checksum": "md5:d97e8bd67340fc7c971bc4bd57ac5217",
+   "links": {
+    "self": "https://zenodo.org/api/records/24305089/files/kg.nq.gz/content"
+   }
+  },
+  {
+   "id": "dc355da8-4ab7-4e8e-9462-d75c28ccab59",
+   "key": "void.ttl",
+   "size": 225355,
+   "checksum": "md5:f2aec1b6c4c6f0c4dc0984578dcc9c23",
+   "links": {
+    "self": "https://zenodo.org/api/records/24305089/files/void.ttl/content"
+   }
+  }
+ ],
+ "links": {
+  "self": "https://zenodo.org/api/records/24305089",
+  "self_html": "https://zenodo.org/records/24305089",
+  "files": "https://zenodo.org/api/records/24305089/files"
+ }
+}

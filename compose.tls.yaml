@@ -1,0 +1,21 @@
+# Serve over HTTPS with a Let's Encrypt certificate:
+#   docker compose -f compose.yaml -f compose.tls.yaml up -d
+# SERVER_NAME must be set in .env to the public host name. See the README for obtaining the
+# first certificate and for renewals.
+
+services:
+  web:
+    ports: !override
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx/tls/default.conf.template:/etc/nginx/templates/default.conf.template:ro
+      - ./certbot/www/:/var/www/certbot/:ro
+      - ./certbot/conf/:/etc/nginx/ssl/:ro
+
+  certbot:
+    image: certbot/certbot:latest
+    profiles: ["certbot"]
+    volumes:
+      - ./certbot/www/:/var/www/certbot/:rw
+      - ./certbot/conf/:/etc/letsencrypt/:rw
