@@ -14,7 +14,10 @@ from rdflib.namespace import RDF, XSD
 
 from .describe import FORMAT_LABELS, FORMATS, Description
 
-YASGUI_VERSION = "4.6.2"
+# Matdata-eu's YASGUI (https://github.com/Matdata-eu/yasgui), the one in the mathiasvda/yasgui
+# Docker image: themes, Font Awesome icons, graph/geo/chart result plugins.
+YASGUI_PACKAGE = "@matdata/yasgui"
+YASGUI_VERSION = "6.14.0"
 
 TYPE = str(RDF.type)
 FIRST_PROPERTIES = [
@@ -145,14 +148,20 @@ class Page:
     def sparql_url(self) -> str:
         return self.root + "sparql"
 
-    def layout(self, body: str, head: str = "") -> str:
+    def header(self) -> str:
+        return (f'<header class="top"><div class="in"><a class="kg" href="{esc(self.root)}">{esc(self.kg_title)}</a>'
+                f'<nav><a href="{esc(self.root)}">About</a><a href="{esc(self.root)}sparql-ui/">SPARQL editor</a>'
+                f'<a href="{esc(self.sparql_url)}">Endpoint</a></nav></div></header>')
+
+    def document(self, body: str, css: str, head: str = "") -> str:
         return f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>{esc(self.title)}</title><style>{CSS}</style>{head}</head>
-<body><header class="top"><div class="in"><a class="kg" href="{esc(self.root)}">{esc(self.kg_title)}</a>
-<nav><a href="{esc(self.root)}">About</a><a href="{esc(self.root)}sparql-ui/">SPARQL editor</a>
-<a href="{esc(self.sparql_url)}">Endpoint</a></nav></div></header>
-<main>{body}</main>{f'<footer>{self.footer}</footer>' if self.footer else ''}</body></html>"""
+<title>{esc(self.title)}</title><style>{css}</style>{head}</head>
+<body>{body}</body></html>"""
+
+    def layout(self, body: str, head: str = "") -> str:
+        footer = f"<footer>{self.footer}</footer>" if self.footer else ""
+        return self.document(f"{self.header()}\n<main>{body}</main>{footer}", CSS, head)
 
     def local_url(self, iri: str) -> str | None:
         """URL of the resource page on this server, for IRIs in the dereferenceable namespace."""
@@ -325,23 +334,45 @@ def error_page(page: Page, message: str) -> str:
     return page.layout(f'<h1>Service unavailable</h1><p class="err">{esc(message)}</p>')
 
 
+# The editor page gets no site-wide CSS, which would leak into YASGUI (link colours,
+# <code>, fonts, ...): only the header bar, themed like YASGUI, which sets data-theme on
+# <html> (from the system preference, or the user's choice with its theme toggle).
+EDITOR_CSS = """
+:root{--bg:#fff;--fg:#1d1f21;--muted:#62666d;--line:#e2e2df;--card:#fbfbfa;--accent:#2457a6}
+@media (prefers-color-scheme:dark){:root:not([data-theme=light]){--bg:#1e1e1e;--fg:#e6e6e3;--muted:#9a9ea5;--line:#3e3e42;--card:#252526;--accent:#8ab4f8}}
+:root[data-theme=dark]{--bg:#1e1e1e;--fg:#e6e6e3;--muted:#9a9ea5;--line:#3e3e42;--card:#252526;--accent:#8ab4f8}
+html,body{height:100%}
+body{margin:0;display:flex;flex-direction:column;background:var(--bg);color:var(--fg);
+ font-family:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;-webkit-font-smoothing:antialiased}
+header.top{flex:none;border-bottom:1px solid var(--line);background:var(--card);font-size:15px;line-height:1.5}
+header.top .in{display:flex;gap:16px;align-items:center;justify-content:space-between;min-height:44px;
+ flex-wrap:wrap;padding:0 16px}
+header.top a{color:var(--accent);text-decoration:none}header.top a:hover{text-decoration:underline}
+header.top .kg{font-weight:600;color:var(--fg)}header.top nav{display:flex;gap:14px;font-size:14px}
+#yasgui{flex:1 1 auto;min-height:0}
+"""
+
+
 def sparql_editor(page: Page, example_query: str) -> str:
-    cdn = f"https://cdn.jsdelivr.net/npm/@zazuko/yasgui@{YASGUI_VERSION}/build"
+    cdn = f"https://cdn.jsdelivr.net/npm/{YASGUI_PACKAGE}@{YASGUI_VERSION}/build"
     head = f'<link rel="stylesheet" href="{cdn}/yasgui.min.css"><script src="{cdn}/yasgui.min.js"></script>'
     config = json.dumps({"endpoint": page.sparql_url, "query": example_query})
-    body = f"""<div id="yasgui"></div><script>
+    body = f"""{page.header()}
+<div id="yasgui"></div><script>
 const cfg = {config};
 cfg.endpoint = new URL(cfg.endpoint, window.location.href).href;  // relative -> absolute
+const params = new URLSearchParams(window.location.search);
 const yasgui = new Yasgui(document.getElementById("yasgui"), {{
   requestConfig: {{ endpoint: cfg.endpoint, method: "POST" }},
   copyEndpointOnNewTab: true, persistenceId: "kgserve:" + cfg.endpoint,
+  endpointCatalogueOptions: {{ getData: () => [{{ endpoint: cfg.endpoint }}] }},
+  yasqe: {{ value: cfg.query }},  // the query of new tabs
+  populateFromUrl: false,  // ?query= is handled below
+  ai: {{ enabled: false }}, sparqlAnything: false,
 }});
-const params = new URLSearchParams(window.location.search);
-const tab = yasgui.getTab();
-if (params.get("query")) {{ tab.setQuery(params.get("query")); }}
-else if (!tab.getQuery() || tab.getQuery().trim() === "") {{ tab.setQuery(cfg.query); }}
+if (params.get("query")) {{ yasgui.getTab().setQuery(params.get("query")); }}
 </script>"""
-    return page.layout(body, head).replace("<main>", '<main style="max-width:none">', 1)
+    return page.document(body, EDITOR_CSS, head)
 
 
 def landing(page: Page, state: dict, base_iri: str) -> str:
