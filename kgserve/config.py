@@ -43,6 +43,7 @@ class SyncConfig:
     data_dir: Path = Path("/data")
     backend: str = "oxigraph"
     interval: int = 3600
+    retry_interval: int = 300
     keep_downloads: bool = False
 
     @classmethod
@@ -61,6 +62,7 @@ class SyncConfig:
             data_dir=Path(_env("DATA_DIR", "/data")),
             backend=_env("BACKEND", "oxigraph").lower(),
             interval=int(_env("SYNC_INTERVAL", "3600")),
+            retry_interval=int(_env("SYNC_RETRY_INTERVAL", "300")),
             keep_downloads=_bool("KEEP_DOWNLOADS", False),
         )
 

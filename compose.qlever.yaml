@@ -1,0 +1,21 @@
+# Use QLever as the triple store (large graphs, fast analytic queries):
+#   docker compose -f compose.yaml -f compose.qlever.yaml up -d --build
+# Each release is indexed offline and served by a new QLever server; the public SPARQL
+# port (7001) switches to it once it is ready, so releases are swapped without downtime.
+
+services:
+  store:
+    build: !override
+      context: .
+      dockerfile: Dockerfile.qlever
+    image: kgserve-qlever:latest
+    environment:
+      BACKEND: qlever
+
+  linked-data:
+    environment:
+      SPARQL_ENDPOINT: http://store:7001/
+
+  web:
+    environment:
+      SPARQL_UPSTREAM: http://store:7001/
