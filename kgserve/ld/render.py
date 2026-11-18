@@ -121,42 +121,55 @@ def html_to_paragraphs(text: str) -> list[str]:
     return [re.sub(r"\s+", " ", p).strip() for p in raw.split("\n") if p.strip()]
 
 
+def root_prefix(path: str) -> str:
+    """Relative URL of the service root from a request path: ``/`` -> ``./``,
+    ``/id/a/b`` -> ``../../``. All links are relative, so the service works wherever a
+    front proxy mounts it (e.g. ``https://example.org/my-kg/``)."""
+    depth = path.split("?", 1)[0].count("/") - 1
+    return "../" * depth if depth > 0 else "./"
+
+
 class Page:
     """Shared layout and link-building context for one request."""
 
-    def __init__(self, *, title: str, kg_title: str, base_path: str, resource_path: str, base_iri: str,
-                 sparql_url: str, footer: str = ""):
+    def __init__(self, *, title: str, kg_title: str, root: str, resource_path: str, base_iri: str,
+                 footer: str = ""):
         self.title = title
         self.kg_title = kg_title
-        self.base_path = base_path
-        self.resource_path = resource_path
+        self.root = root  # relative URL of the service root, e.g. "../../"
+        self.resource_path = resource_path  # e.g. "id"
         self.base_iri = base_iri
-        self.sparql_url = sparql_url
         self.footer = footer
+
+    @property
+    def sparql_url(self) -> str:
+        return self.root + "sparql"
 
     def layout(self, body: str, head: str = "") -> str:
         return f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>{esc(self.title)}</title><style>{CSS}</style>{head}</head>
-<body><header class="top"><div class="in"><a class="kg" href="{esc(self.base_path)}/">{esc(self.kg_title)}</a>
-<nav><a href="{esc(self.base_path)}/">About</a><a href="{esc(self.base_path)}/sparql-ui/">SPARQL editor</a>
+<body><header class="top"><div class="in"><a class="kg" href="{esc(self.root)}">{esc(self.kg_title)}</a>
+<nav><a href="{esc(self.root)}">About</a><a href="{esc(self.root)}sparql-ui/">SPARQL editor</a>
 <a href="{esc(self.sparql_url)}">Endpoint</a></nav></div></header>
 <main>{body}</main>{f'<footer>{self.footer}</footer>' if self.footer else ''}</body></html>"""
 
     def local_url(self, iri: str) -> str | None:
         """URL of the resource page on this server, for IRIs in the dereferenceable namespace."""
         if self.base_iri and iri.startswith(self.base_iri) and len(iri) > len(self.base_iri):
-            return self.resource_path + iri[len(self.base_iri):]
+            rest = iri[len(self.base_iri):]
+            if "?" not in rest:  # a query string would be read as parameters: use /browse
+                return f"{self.root}{self.resource_path}/{rest}"
         return None
 
     def browse_url(self, iri: str, fmt: str | None = None) -> str:
         query = {"iri": iri}
         if fmt:
             query["format"] = fmt
-        return f"{self.base_path}/browse?{urllib.parse.urlencode(query)}"
+        return f"{self.root}browse?{urllib.parse.urlencode(query)}"
 
     def sparql_ui_url(self, query: str) -> str:
-        return f"{self.base_path}/sparql-ui/?{urllib.parse.urlencode({'query': query})}"
+        return f"{self.root}sparql-ui/?{urllib.parse.urlencode({'query': query})}"
 
 
 class ResourceRenderer:
@@ -318,6 +331,7 @@ def sparql_editor(page: Page, example_query: str) -> str:
     config = json.dumps({"endpoint": page.sparql_url, "query": example_query})
     body = f"""<div id="yasgui"></div><script>
 const cfg = {config};
+cfg.endpoint = new URL(cfg.endpoint, window.location.href).href;  // relative -> absolute
 const yasgui = new Yasgui(document.getElementById("yasgui"), {{
   requestConfig: {{ endpoint: cfg.endpoint, method: "POST" }},
   copyEndpointOnNewTab: true, persistenceId: "kgserve:" + cfg.endpoint,
@@ -335,20 +349,25 @@ def landing(page: Page, state: dict, base_iri: str) -> str:
     store = state.get("store") or {}
     parts = [f"<h1>{esc(record.get('title') or page.kg_title)}</h1>"]
     status = state.get("status")
-    if not store:
-        parts.append('<div class="note">The knowledge graph is being loaded. Please come back in a few minutes.</div>'
-                     if status in (None, "syncing", "starting") else "")
+    if status == "loading":
+        parts.append('<div class="note">A new release is being loaded: until it is done, queries may '
+                     'return incomplete results.</div>')
+    elif not store and status != "error":
+        parts.append('<div class="note">The knowledge graph is being loaded. Please come back in a few minutes.</div>')
     if state.get("last_error"):
         parts.append(f'<p class="err small">Last synchronisation error: {esc(state["last_error"])}</p>')
     for paragraph in html_to_paragraphs(record.get("description", ""))[:8]:
         parts.append(f'<p class="desc">{esc(paragraph)}</p>')
 
-    access = [("SPARQL endpoint", f'<code>{esc(page.sparql_url)}</code>'),
-              ("SPARQL editor", f'<a href="{esc(page.base_path)}/sparql-ui/">{esc(page.base_path)}/sparql-ui/</a>')]
+    # Absolute URLs depend on where a front proxy mounts the service: computed in the browser.
+    access = [("SPARQL endpoint", f'<code data-url="{esc(page.sparql_url)}">{esc(page.sparql_url)}</code>'),
+              ("SPARQL editor", f'<a href="{esc(page.root)}sparql-ui/" data-url="{esc(page.root)}sparql-ui/">'
+                                f'{esc(page.root)}sparql-ui/</a>')]
     if base_iri:
+        resources = f"{page.root}{page.resource_path}/"
         access.append(("Linked data", f'IRIs starting with <code>{esc(base_iri)}</code> are served at '
-                                      f'<a href="{esc(page.resource_path)}">{esc(page.resource_path)}</a> '
-                                      "(HTML, Turtle, N-Triples, JSON-LD, RDF/XML, N-Quads, TriG)"))
+                                      f'<code data-url="{esc(resources)}">{esc(resources)}</code> '
+                                      "(HTML, Turtle, N-Triples, JSON-LD, RDF/XML, N3, N-Quads, TriG)"))
     examples = state.get("example_resources") or []
     if examples:
         links = ", ".join(f'<a href="{esc(page.local_url(e) or page.browse_url(e))}">{esc(e)}</a>' for e in examples[:5])
@@ -369,7 +388,7 @@ def landing(page: Page, state: dict, base_iri: str) -> str:
         parts.append("<h2>Dataset</h2><dl class=meta>" + "".join(f"<dt>{k}</dt><dd>{v}</dd>" for k, v in meta) + "</dl>")
 
     sync = [("Statements", f"{store['triples']:,}" if store.get("triples") is not None else "-"),
-            ("Store", esc(state.get("backend") or "-")),
+            ("Store", esc(state.get("store_type") or "-")),
             ("Last loaded", esc(state.get("last_sync") or "-")),
             ("Last checked", esc(state.get("last_check") or "-")),
             ("Next check", esc(state.get("next_check") or "-"))]
@@ -380,4 +399,6 @@ def landing(page: Page, state: dict, base_iri: str) -> str:
         rows = "".join(f'<tr><th><a href="{esc(page.local_url(g["iri"]) or page.browse_url(g["iri"]))}">{esc(g["iri"])}</a></th>'
                        f'<td>{g["triples"]:,}</td></tr>' for g in graphs)
         parts.append(f'<h2>Named graphs ({len(graphs)})</h2><table class="props graphs">{rows}</table>')
+    parts.append("<script>for (const e of document.querySelectorAll('[data-url]')) "
+                 "e.textContent = new URL(e.dataset.url, window.location.href).href;</script>")
     return page.layout("".join(parts))

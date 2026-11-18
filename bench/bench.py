@@ -1,6 +1,6 @@
 """Time a few representative queries against a SPARQL endpoint.
 
-    python bench/bench.py http://localhost:8080/kg/sparql [--runs 3] [--iri <resource IRI>]
+    python bench/bench.py http://127.0.0.1:8080/sparql [--runs 3] [--iri <resource IRI>]
 
 Queries: a full count, a type histogram, a resource description as done by the linked-data
 server, a label substring search and a per-graph aggregation. Prints the median time of
