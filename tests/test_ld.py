@@ -183,7 +183,8 @@ def test_pages(ld):
     status, _, body = get(base + "/", "text/html")
     assert status == 200 and "Test KG" in body and "About" in body
     status, _, body = get(base + "/sparql-ui/", "text/html")
-    assert status == 200 and "yasgui" in body.lower()
+    assert status == 200 and "@matdata/yasgui@" in body
+    assert "<main>" not in body  # no site-wide CSS around the editor
     status, _, body = get(base + "/status.json")
     assert json.loads(body)["status"] == "ok"
 

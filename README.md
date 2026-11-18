@@ -19,7 +19,7 @@ docker compose up -d --build
 | --- | --- |
 | `/` | landing page: dataset metadata (from Zenodo), statistics, named graphs, sync status |
 | `/sparql` | SPARQL endpoint (query only, GET/POST, CORS); browsers are sent to the editor |
-| `/sparql-ui/` | SPARQL editor (YASGUI; `?query=` pre-fills it) |
+| `/sparql-ui/` | SPARQL editor ([Matdata-eu's YASGUI](https://github.com/Matdata-eu/yasgui), as in the `mathiasvda/yasgui` image; `?query=` pre-fills it) |
 | `/id/<path>` | the resource `<baseIri><path>`: HTML page, or by content negotiation Turtle, N-Triples, JSON-LD, RDF/XML, N3, N-Quads, TriG (`?format=ttl` or `.ttl` also work) |
 | `/browse?iri=<IRI>` | any other IRI in the graph (e.g. ontology terms) |
 | `/status.json` | synchronisation state |
