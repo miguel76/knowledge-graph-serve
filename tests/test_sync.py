@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 
 from kgserve import rdffiles
-from kgserve.config import SyncConfig
+from kgserve.config import Config, ConfigError, StoreConfig
 from kgserve.sync import Syncer, graph_template
 from kgserve.zenodo import ZenodoRecord, parse_record_ref
 
@@ -107,53 +107,64 @@ class FakeZenodo:
     def download(self, file, dest):
         self.downloads.append(file.key)
         dest.parent.mkdir(parents=True, exist_ok=True)
-        dest.write_bytes(b"<http://ex.org/a#x> <http://ex.org/p> <http://ex.org/b> .\n")
+        if file.key.endswith(".nq.gz"):
+            dest.write_bytes(gzip.compress(b"<http://ex.org/a#x> <http://ex.org/p> <http://ex.org/b#z> <http://ex.org/g> .\n"))
+        else:
+            dest.write_bytes(b"<http://ex.org/a#y> <http://ex.org/p> <http://ex.org/b> .\n")
         return dest
 
 
-class FakeBackend:
-    name = "fake"
-    query_endpoint = "http://unused"
-    auth = None
-
+class FakeStore:
     def __init__(self):
         self.loads = []
+        self.empty = False
 
-    def load(self, items, tag):
+    def load(self, items, tap=None):
         self.loads.append([item.key for item in items])
-        return {"tag": tag, "triples": 1}
+        for item in items:  # stream each file through the tap, as the real loader does
+            stream = tap(item, item.open()) if tap else item.open()
+            with stream:
+                while stream.read(7):
+                    pass
+        self.empty = False
+        return {"triples": 1, "load_seconds": 0.1}
 
-    def hash_subjects(self):
-        return ["http://ex.org/a#x", "http://ex.org/a#y", "http://ex.org/b#z"]
+    def is_empty(self):
+        return self.empty
 
 
 def test_sync_once(tmp_path, monkeypatch):
     record = ZenodoRecord.from_api(json.loads((HERE / "zenodo_record.json").read_text()))
-    monkeypatch.setattr("kgserve.sync.describe_store", lambda backend: {"uri_spaces": ["http://ex.org/"]})
-    syncer = Syncer(SyncConfig(record="24305088", data_dir=tmp_path, backend="oxigraph"))
+    monkeypatch.setattr("kgserve.sync.describe_store", lambda store: {"uri_spaces": ["http://ex.org/"]})
+    syncer = Syncer(Config(zenodo="24305088", data_dir=tmp_path))
     syncer.zenodo = FakeZenodo(record)
-    syncer.backend = FakeBackend()
+    syncer.store = FakeStore()
 
-    # kg.nq.gz is not really gzipped here: only names matter to the fake backend.
     assert syncer.sync_once() is True
-    assert syncer.backend.loads == [["kg.nq.gz", "void.ttl"]]
+    assert syncer.store.loads == [["kg.nq.gz", "void.ttl"]]
     state = json.loads((tmp_path / "state.json").read_text())
     assert state["status"] == "ok"
     assert state["record"]["id"] == "24305089"
     assert state["uri_spaces"] == ["http://ex.org/"]
+    # From the N-Quads stream (a#x) and from parsing the Turtle file (a#y); b#z is an object.
     assert json.loads((tmp_path / "hash-index.json").read_text()) == {
-        "http://ex.org/a": ["http://ex.org/a#x", "http://ex.org/a#y"], "http://ex.org/b": ["http://ex.org/b#z"]}
+        "http://ex.org/a": ["http://ex.org/a#x", "http://ex.org/a#y"]}
     assert not (tmp_path / "downloads").exists()  # removed after loading
 
     # Same version: nothing to do. Forced: reload.
     assert syncer.sync_once() is False
     assert syncer.sync_once(force=True) is True
-    assert len(syncer.backend.loads) == 2
+    assert len(syncer.store.loads) == 2
 
     # Different file selection: reload.
-    syncer.config.include = ["kg.nq.gz"]
+    syncer.config.files = ["kg.nq.gz"]
     assert syncer.sync_once() is True
-    assert syncer.backend.loads[-1] == ["kg.nq.gz"]
+    assert syncer.store.loads[-1] == ["kg.nq.gz"]
+
+    # The store lost its data (e.g. its volume was recreated): reload.
+    assert syncer.sync_once() is False
+    syncer.store.empty = True
+    assert syncer.sync_once() is True
 
 
 @pytest.mark.parametrize("interval,retry,failures,expected", [
@@ -195,43 +206,87 @@ def test_failed_sync_is_retried_sooner(tmp_path, monkeypatch):
     import time
 
     record = ZenodoRecord.from_api(json.loads((HERE / "zenodo_record.json").read_text()))
-    monkeypatch.setattr("kgserve.sync.describe_store", lambda backend: {})
-    config = SyncConfig(record="24305088", data_dir=tmp_path, interval=3600, retry_interval=1)
-    syncer = Syncer(config)
-    syncer.poll_seconds = 0.05
+    monkeypatch.setattr("kgserve.sync.describe_store", lambda store: {})
+    syncer = Syncer(Config(zenodo="24305088", data_dir=tmp_path, sync_interval=3600, retry_interval=1))
     syncer.zenodo = FlakyZenodo(record, failures=2)
-    syncer.backend = FakeBackend()
-    syncer.backend.shutdown = lambda: None
-    syncer.backend.check = lambda: None
-    syncer.backend.resume = lambda state: None
+    syncer.store = FakeStore()
 
     thread = threading.Thread(target=syncer.run)
     thread.start()
     try:
         # Fails at start-up, retries after 1 s, fails again, retries after 2 s, then loads.
         deadline = time.monotonic() + 15
-        while not syncer.backend.loads and time.monotonic() < deadline:
+        while not syncer.store.loads and time.monotonic() < deadline:
             time.sleep(0.05)
-        assert syncer.backend.loads, "the sync was not retried"
+        assert syncer.store.loads, "the sync was not retried"
         assert syncer.zenodo.calls == 3
         time.sleep(0.2)
         state = json.loads((tmp_path / "state.json").read_text())
         assert state["failures"] == 0 and state["status"] == "ok"
         assert syncer.failures == 0
     finally:
-        syncer.stop.set()
+        syncer._signal(stop=True)
         thread.join(5)
     assert not thread.is_alive()
 
 
 def test_failure_state(tmp_path, monkeypatch):
     record = ZenodoRecord.from_api(json.loads((HERE / "zenodo_record.json").read_text()))
-    syncer = Syncer(SyncConfig(record="24305088", data_dir=tmp_path))
+    syncer = Syncer(Config(zenodo="24305088", data_dir=tmp_path))
     syncer.zenodo = FlakyZenodo(record, failures=5)
-    syncer.backend = FakeBackend()
+    syncer.store = FakeStore()
     assert syncer._safe_sync(False) is False
     assert syncer._safe_sync(False) is False
     state = json.loads((tmp_path / "state.json").read_text())
     assert state["failures"] == 2
     assert "Zenodo is unreachable" in state["last_error"]
     assert state["status"] == "error"  # nothing loaded yet
+
+
+def test_config_file(tmp_path, monkeypatch):
+    monkeypatch.setenv("KG_STORE_TYPE", "fuseki")
+    monkeypatch.setenv("DATA_DIR", str(tmp_path / "data"))
+    path = tmp_path / "config.json"
+    path.write_text('{"zenodo": "10.5281/zenodo.24305088", "files": ["*.nq.gz"], "resourcePath": "/res/"}')
+    config = Config.load(path)
+    assert config.zenodo == "10.5281/zenodo.24305088"
+    assert config.files == ["*.nq.gz"]
+    assert config.resource_path == "res"
+    assert config.sync_interval == 3600 and config.base_iri == ""  # defaults
+    assert config.store.type == "fuseki"
+    assert config.store.query == "http://store:3030/ds/sparql"
+    assert config.data_dir == tmp_path / "data"
+
+
+@pytest.mark.parametrize("content,message", [
+    ("{}", '"zenodo"'),
+    ('{"zenodo": "1", "syncIntervall": 5}', "Unknown option"),
+    ('{"zenodo": "1", "syncInterval": "1h"}', "must be a int"),
+    ('{"zenodo": "1", "followLatest": 1}', "must be a bool"),
+    ('{"zenodo": "1", "files": "*.nq"}', "must be a list"),
+    ('{"zenodo": "1",}', "not valid JSON"),
+    ("[]", "JSON object"),
+])
+def test_config_errors(tmp_path, content, message):
+    path = tmp_path / "config.json"
+    path.write_text(content)
+    with pytest.raises(ConfigError, match=message):
+        Config.load(path)
+
+
+def test_config_missing_file_mounted_as_directory(tmp_path):
+    # Docker creates a directory when a bind-mounted file does not exist.
+    (tmp_path / "config.json").mkdir()
+    with pytest.raises(ConfigError, match="is a directory"):
+        Config.load(tmp_path / "config.json")
+
+
+def test_store_defaults(monkeypatch):
+    monkeypatch.setenv("KG_STORE_TYPE", "graphdb")
+    monkeypatch.setenv("KG_STORE_REPOSITORY", "cckg")
+    store = StoreConfig.from_env()
+    assert store.query == "http://store:7200/repositories/cckg"
+    assert store.data == "http://store:7200"
+    monkeypatch.setenv("KG_STORE_TYPE", "nope")
+    with pytest.raises(ConfigError):
+        StoreConfig.from_env()

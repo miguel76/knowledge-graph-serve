@@ -1,225 +1,186 @@
 # knowledge-graph-serve
 
-A tool to serve any knowledge graph whose dump is published on [Zenodo](https://zenodo.org):
-it follows the Zenodo record, loads every new release into a triple store, and offers
+Serves a knowledge graph published on [Zenodo](https://zenodo.org) as a **SPARQL endpoint**
+and as **linked data**, and keeps it in sync with the latest release of the record.
 
-* a **SPARQL endpoint** (read-only, CORS enabled) and a SPARQL editor (YASGUI);
-* **linked data**: every IRI of the knowledge graph dereferences to an HTML page or, by
-  content negotiation, to Turtle, N-Triples, JSON-LD, RDF/XML, N3, N-Quads or TriG;
-* a landing page with the dataset metadata (from Zenodo) and the synchronisation status.
+Point it at a Zenodo DOI and start it:
 
-It generalises [climate-change-kg-docker](https://github.com/hacid-project/climate-change-kg-docker)
-(GraphDB + LodView + YASGUI + nginx): nothing is specific to one knowledge graph, data are
-loaded automatically, and LodView is replaced by a linked-data server that serves all RDF
-serialisations. The evaluation of triple stores and linked-data front ends that led to these
-choices is in [docs/alternatives.md](docs/alternatives.md).
+```bash
+echo '{"zenodo": "10.5281/zenodo.24305088"}' > config.json
+```
+
+```bash
+docker compose up -d --build
+```
+
+<http://127.0.0.1:8080/> now serves the Climate Change Knowledge Graph:
+
+| Path | What |
+| --- | --- |
+| `/` | landing page: dataset metadata (from Zenodo), statistics, named graphs, sync status |
+| `/sparql` | SPARQL endpoint (query only, GET/POST, CORS); browsers are sent to the editor |
+| `/sparql-ui/` | SPARQL editor (YASGUI; `?query=` pre-fills it) |
+| `/id/<path>` | the resource `<baseIri><path>`: HTML page, or by content negotiation Turtle, N-Triples, JSON-LD, RDF/XML, N3, N-Quads, TriG (`?format=ttl` or `.ttl` also work) |
+| `/browse?iri=<IRI>` | any other IRI in the graph (e.g. ontology terms) |
+| `/status.json` | synchronisation state |
+
+All URLs that the service generates are relative, so a front web server can publish it
+under any path, with HTTPS (see [Publishing](#publishing)). One instance serves one
+knowledge graph; to serve several, run one instance per graph.
 
 ## How it works
 
 ```
-                     ┌──────────────────────── store ──────────────────────────┐
- Zenodo record ────▶ │ kgserve sync: resolve latest version → download → verify │
- (concept DOI)       │ md5 → bulk load into a new Oxigraph store → swap server  │
-                     │                   oxigraph serve-read-only :7878          │
-                     └──────────────────────────────▲───────────────────────────┘
-                                                    │ SPARQL
-           ┌─────────── web (nginx) ───────────┐    │    ┌──── linked-data ─────┐
- client ──▶│ {BASE_PATH}/sparql  ──────────────┼────┘    │ kgserve ld           │
-           │ {RESOURCE_PATH}/…   ──────────────┼────────▶│ resource pages, RDF, │
-           │ {BASE_PATH}/ (landing, editor)  ──┼────────▶│ landing, SPARQL UI   │
-           └───────────────────────────────────┘         └──────────────────────┘
+                      ┌──────────────┐   SPARQL Update +
+  Zenodo record ────▶ │     sync     │── Graph Store Protocol ──┐
+  (latest version)    └──────────────┘                          ▼
+                                                         ┌─────────────┐
+                      ┌──────────────┐   /sparql         │    store    │
+  front proxy ──────▶ │  web (nginx) │──────────────────▶│  (Oxigraph) │
+  (optional)          │              │   everything else └─────────────┘
+                      │              │──────────▶┌─────────────┐  ▲
+                      └──────────────┘           │ linked-data │──┘ SPARQL
+                                                 └─────────────┘
 ```
 
-* **Sync** (`kgserve sync`): a long-running process that checks the record every
-  `SYNC_INTERVAL` seconds (no cron needed), and retries sooner after a failure. A concept DOI
-  always resolves to the latest version. When there is a new version it downloads the RDF
-  files (`.nt .nq .ttl .trig .rdf .owl .jsonld .n3`, optionally `.gz/.bz2/.xz`, or `.zip`
-  archives of them), verifies their checksums and loads them. Quad files keep their named
-  graphs; each triple file goes to its own named graph (`TRIPLES_GRAPH`).
-* **Blue/green loading** (default Oxigraph backend): each release is bulk-loaded offline
-  into a fresh store while the previous one keeps answering queries; then the read-only
-  server is restarted on the new store (about 0.2 s; no failed requests in testing). If
-  anything fails, the previous release stays online.
-* **Linked data** (`kgserve ld`): `{PUBLIC_URL}{RESOURCE_PATH}/x` describes the IRI
-  `{KG_BASE_IRI}x`. RDF responses use the canonical IRIs (e.g. `https://w3id.org/…`), while
-  HTML pages link to the local pages. Hash IRIs (`doc#a`) are served with their document
-  (`doc`). Any other IRI of the graph can be browsed at `{BASE_PATH}/browse?iri=…`.
+Four containers, each with one job:
 
-The store, the linked-data server and nginx are three services of one Docker Compose
-project. The `kgserve` image (Python + the Oxigraph binary) is about 230 MB.
+* **store**: the triple store, from its vendor image (Oxigraph by default; Fuseki and
+  GraphDB are alternatives). Only its query endpoint is reachable from outside.
+* **sync**: checks the Zenodo record every `syncInterval` seconds. When a new version is
+  published (a concept DOI always resolves to the latest one), it downloads the RDF files,
+  verifies their checksums and loads them into the store over standard protocols. It
+  empties the store with `DROP ALL`, then posts each file. While a release loads (about
+  30 s for 6 million quads), queries see partial data; the landing page says so.
+* **linked-data**: resource pages and RDF serialisations, the landing page and the SPARQL
+  editor. It only needs the SPARQL endpoint.
+* **web**: nginx, routing `/sparql` to the store and everything else to linked-data.
 
-## Quick start
-
-Requirements: Docker with Compose v2.24.4 or later.
-
-```bash
-git clone https://github.com/miguel76/knowledge-graph-serve
-```
-
-```bash
-cd knowledge-graph-serve
-```
-
-```bash
-docker compose build
-```
-
-Generate a `.env` for your record. `init` reads the record, finds the IRI namespace in its
-VoID description (`void:uriSpace`), if any, and derives the URL paths from it:
-
-```bash
-docker compose run --rm --no-deps store init 10.5281/zenodo.24305088 -o - --public-url http://localhost:8080 > .env
-```
-
-```bash
-docker compose up -d
-```
-
-Then open <http://localhost:8080/climate-change-kg/>. The first load takes a few minutes
-(downloading and indexing); `docker compose logs -f store` shows the progress.
-
-For the Climate Change Knowledge Graph the generated `.env` is:
-
-```ini
-ZENODO_RECORD=10.5281/zenodo.24305088
-KG_TITLE=Climate Change Knowledge Graph (CCKG)
-PUBLIC_URL=http://localhost:8080
-BASE_PATH=/climate-change-kg
-RESOURCE_PATH=/climate-change-kg/id
-KG_BASE_IRI=https://w3id.org/climate-change-kg/data/
-HTTP_PORT=8080
-SYNC_INTERVAL=3600
-```
-
-and the service offers:
-
-| URL | What |
-| --- | --- |
-| `/climate-change-kg/` | landing page: metadata, statistics, named graphs |
-| `/climate-change-kg/sparql` | SPARQL endpoint (GET/POST); browsers are redirected to the editor |
-| `/climate-change-kg/sparql-ui/` | SPARQL editor (`?query=` pre-fills it) |
-| `/climate-change-kg/id/climdex/indices/CDD` | `https://w3id.org/climate-change-kg/data/climdex/indices/CDD`, by content negotiation |
-| `/climate-change-kg/id/climdex/indices/CDD.ttl` or `…?format=ttl` | a given format (`ttl nt jsonld rdf n3 nq trig html`) |
-| `/climate-change-kg/browse?iri=…` | any other IRI in the graph (e.g. ontology terms) |
-| `/climate-change-kg/status.json` | synchronisation state |
+Formats: `.nt .nq .ttl .trig .rdf .owl .jsonld .n3`, optionally compressed (`.gz`, `.bz2`,
+`.xz`), and `.zip` archives of them. Quad formats keep their named graphs; each file in a
+triple format goes into its own named graph (`triplesGraph`).
 
 ## Configuration
 
-All settings are environment variables, normally in `.env`; see [.env.example](.env.example)
-for the full list. The main ones:
+Everything about the knowledge graph is in `config.json`, next to `compose.yaml`. Only
+`zenodo` is required:
 
-| Variable | Default | Meaning |
+| Option | Default | Meaning |
 | --- | --- | --- |
-| `ZENODO_RECORD` | (required) | record id, DOI or URL; a concept DOI follows new versions |
-| `ZENODO_FOLLOW_LATEST` | `true` | `false` pins the given version |
-| `KG_FILES`, `KG_EXCLUDE_FILES` | all RDF files | glob patterns of the record files to load |
-| `TRIPLES_GRAPH` | `https://doi.org/{conceptdoi}#{key}` | named graph of triple files (`default` for the default graph) |
-| `SYNC_INTERVAL` | `3600` | seconds between checks (`0`: only on start and on demand) |
-| `SYNC_RETRY_INTERVAL` | `300` | after a failed check, retry this soon, doubling on each further failure up to `SYNC_INTERVAL` (`0`: no early retries) |
-| `PUBLIC_URL` | `http://localhost:8080` | public origin, used in the pages |
-| `BASE_PATH` | `/kg` | path of the service |
-| `RESOURCE_PATH` | `{BASE_PATH}/id` | path where the IRIs are dereferenced |
-| `KG_BASE_IRI` | first `void:uriSpace` in the data | IRI namespace served at `RESOURCE_PATH` |
-| `HTTP_PORT` | `8080` | published HTTP port |
-| `DATA_PATH` | `./data` | where downloads, stores and state are kept |
+| `zenodo` | (required) | Zenodo record: DOI, record id or URL. A concept DOI follows new versions |
+| `followLatest` | `true` | `false` pins the version given in `zenodo` |
+| `files` | all RDF files | glob patterns of the record files to load, e.g. `["kg.nq.gz"]` |
+| `excludeFiles` | `[]` | glob patterns of files not to load |
+| `triplesGraph` | `"https://doi.org/{conceptdoi}#{key}"` | named graph for files in triple formats; placeholders `{key}` `{recid}` `{conceptrecid}` `{doi}` `{conceptdoi}`; `"default"` for the default graph |
+| `baseIri` | the first `void:uriSpace` in the data | IRI namespace served at `/id/` |
+| `resourcePath` | `"id"` | path where the IRIs under `baseIri` are served |
+| `title` | the Zenodo record title | title shown in the pages |
+| `syncInterval` | `3600` | seconds between checks for a new version (`0`: only at start and on demand) |
+| `retryInterval` | `300` | after a failed check, retry this soon, doubling on each further failure up to `syncInterval` (`0`: no early retries) |
+| `describeLimit` | `5000` | maximum statements in a resource description |
+| `inverseLimit` | `50` | maximum incoming links shown on a resource page |
+| `zenodoApi` | `"https://zenodo.org/api"` | e.g. the Zenodo sandbox |
+| `zenodoToken` | none | access token, only for restricted records |
 
-To make the IRIs resolvable, redirect the namespace to the service. For example a w3id.org
-rule sending `https://w3id.org/climate-change-kg/data/(.*)` to
-`https://keng.istc.cnr.it/climate-change-kg/id/$1` (this is how the CCKG is set up today).
+A complete example:
+
+```json
+{
+  "zenodo": "10.5281/zenodo.24305088",
+  "files": ["kg.nq.gz", "void.ttl"],
+  "baseIri": "https://w3id.org/climate-change-kg/data/",
+  "title": "Climate Change Knowledge Graph",
+  "syncInterval": 86400
+}
+```
+
+`config.json` describes the knowledge graph only. Two things are container wiring, in the
+compose files:
+
+* the address the service listens on: `127.0.0.1:8080` by default, changed with the
+  `KG_LISTEN` variable (e.g. `KG_LISTEN=127.0.0.1:8081 docker compose up -d`);
+* the triple store (see [Other triple stores](#other-triple-stores)).
+
+Data are kept in `./data` (`data/store` for the store, `data/sync` for the sync state).
+
+## Publishing
+
+The service answers at the root of `KG_LISTEN`. To publish it, add a location to the
+front web server that also handles the host name and HTTPS. For example, with nginx and
+the knowledge graph at `https://keng.istc.cnr.it/climate-change-kg/`:
+
+```nginx
+server {
+    listen 443 ssl;
+    http2 on;
+    server_name keng.istc.cnr.it;
+    ssl_certificate     /etc/letsencrypt/live/keng.istc.cnr.it/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/keng.istc.cnr.it/privkey.pem;
+
+    location = /climate-change-kg {
+        return 301 /climate-change-kg/;
+    }
+
+    location /climate-change-kg/ {
+        proxy_pass http://127.0.0.1:8080/;   # the trailing slash strips the prefix
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_read_timeout 300s;
+    }
+}
+```
+
+Certificates, redirects from old paths and other sites are then all handled in the front
+server, as usual. To serve several knowledge graphs, run one instance per graph (one
+directory each, with its own `config.json` and `KG_LISTEN` port) and add one location per
+graph.
+
+To make the IRIs resolvable, redirect their namespace to the resource path. For
+example, a w3id.org rule sending `https://w3id.org/climate-change-kg/data/(.*)` to
+`https://keng.istc.cnr.it/climate-change-kg/id/$1`, as is set up today for the CCKG.
+
+## Other triple stores
+
+The store is replaced by adding a compose file:
+
+* **Apache Jena Fuseki** (with a Lucene index on labels):
+  `docker compose -f compose.yaml -f compose.fuseki.yaml up -d --build`
+* **GraphDB**: `docker compose -f compose.yaml -f compose.graphdb.yaml up -d --build`. GraphDB 11
+  needs a license file, also for the free edition: put it in `./graphdb.license`. The sync
+  creates the repository `kg` and replaces its content in one transaction per release, so
+  queries never see partial data.
+
+Any store that supports SPARQL Update and the Graph Store Protocol works the same way.
+Point the services at it with `KG_STORE_TYPE` (`oxigraph`, `fuseki` or `graphdb`, which
+select default endpoints), or explicitly with `KG_STORE_QUERY`, `KG_STORE_UPDATE`,
+`KG_STORE_DATA`, `KG_STORE_USER` and `KG_STORE_PASSWORD`, and set `SPARQL_UPSTREAM` for
+nginx (see the two override files).
 
 ## Operations
 
 ```bash
-docker compose logs -f store            # sync and load progress
+docker compose logs -f sync              # synchronisation progress
 ```
 
 ```bash
-docker compose kill -s HUP store        # check Zenodo for a new version now
+docker compose kill -s HUP sync          # check Zenodo for a new version now
 ```
 
 ```bash
-docker compose kill -s USR1 store       # reload the current version (e.g. after changing KG_FILES)
+docker compose kill -s USR1 sync         # reload the current version
 ```
 
 ```bash
-docker compose run --rm --no-deps store resolve 10.5281/zenodo.24305088   # show versions and files
+docker compose run --rm --no-deps sync resolve 10.5281/zenodo.24305088   # versions and files of a record
 ```
 
-The state (loaded version, statement count, errors, next check) is in
-`data/state.json` and at `{BASE_PATH}/status.json`.
-
-### Choosing another triple store
-
-Oxigraph is the default (see [docs/alternatives.md](docs/alternatives.md) for why).
-
-* **QLever**, for large graphs and fast analytic queries:
-  `docker compose -f compose.yaml -f compose.qlever.yaml up -d --build`. Like Oxigraph it
-  is managed by the sync: each release is indexed offline (formats QLever does not read
-  are converted on the fly). The public port then switches to the new server once it
-  answers, so releases are swapped without downtime. Options: `QLEVER_MEMORY` (query
-  memory, default `4G`), `QLEVER_TIMEOUT` (default `60` s), `QLEVER_QUERY_THREADS`
-  (default `4`), `QLEVER_INDEX_MEMORY`, `QLEVER_INDEX_SETTINGS` (path, inside the container, of a
-  JSON settings file for `qlever-index`), `QLEVER_SERVER_ARGS` (extra `qlever-server` arguments).
-
-The sync also works with stores it does not manage:
-
-* **GraphDB**: `docker compose -f compose.yaml -f compose.graphdb.yaml up -d`. The
-  repository is created if missing and each release replaces its content in one RDF4J
-  transaction. GraphDB 11 needs a license file, also for the free edition: put it in
-  `./graphdb.license`. Any other RDF4J server works too (`BACKEND=rdf4j`,
-  `GRAPHDB_URL`, `GRAPHDB_REPOSITORY_CONFIG`).
-* **Apache Jena Fuseki**: `docker compose -f compose.yaml -f compose.fuseki.yaml up -d`
-  (with a Lucene index on labels). Loads are not atomic: during a load the endpoint
-  serves partial data.
-* Any store with SPARQL Update and the Graph Store Protocol: `BACKEND=gsp` with
-  `GSP_DATASET_URL`, `GSP_UPDATE_URL` and `GSP_QUERY_URL`.
-
-The linked-data server only needs a SPARQL endpoint (`SPARQL_ENDPOINT`). Its queries
-have been tested on Oxigraph, Fuseki and QLever.
-
-### HTTPS
-
-Set `SERVER_NAME` (the public host name) in `.env`, then get the first certificate. The
-HTTP server must be running for the ACME challenge, so the first time start it without
-TLS:
-
-```bash
-docker compose up -d web
-```
-
-```bash
-docker compose -f compose.yaml -f compose.tls.yaml run --rm certbot certonly --webroot -w /var/www/certbot -d "$SERVER_NAME"
-```
-
-```bash
-docker compose -f compose.yaml -f compose.tls.yaml up -d
-```
-
-To renew the certificate later:
-
-```bash
-docker compose -f compose.yaml -f compose.tls.yaml run --rm certbot renew
-```
-
-```bash
-docker compose -f compose.yaml -f compose.tls.yaml restart web
-```
-
-Site-specific nginx additions, such as legacy redirects, go in `nginx/extra/*.inc` (see
-the example there).
-
-### Migrating climate-change-kg-docker
-
-1. Generate `.env` with `init` (above) and set `PUBLIC_URL=https://keng.istc.cnr.it` and
-   `SERVER_NAME=keng.istc.cnr.it`.
-2. Copy the existing `certbot/` directory and use `compose.tls.yaml`.
-3. Copy `nginx/extra/legacy-redirects.inc.example` to `nginx/extra/legacy-redirects.inc`
-   for the old `/hacid-cs-kg` paths.
-4. The paths stay the same (`/climate-change-kg/sparql`, `/climate-change-kg/sparql-ui/`,
-   `/climate-change-kg/id/…`), so the w3id.org redirect and existing clients keep working.
-
-Not covered: the writable `climate-change-kg-cases` repository of the old setup. It is
-not a Zenodo release; keep it in GraphDB, or in a separate store, next to this service.
+The sync runs continuously: no cron job is needed. It checks at start-up and then every
+`syncInterval` seconds. A failed check (Zenodo unreachable, a download or a load failing) is
+retried after `retryInterval` seconds, doubling at each further failure. If the store
+loses its data (e.g. its volume is recreated), the next check reloads the release. The
+state (loaded version, statement count, last error, next check) is in
+`data/sync/state.json` and at `/status.json`.
 
 ## Development
 
@@ -232,11 +193,17 @@ python -m pytest
 ```
 
 ```bash
-python bench/bench.py http://localhost:8080/climate-change-kg/sparql
+python bench/bench.py http://127.0.0.1:8080/sparql
 ```
 
-Code layout: `kgserve/zenodo.py` (Zenodo API), `kgserve/rdffiles.py` (formats and
-archives), `kgserve/backends.py` (stores), `kgserve/qlever.py` and `kgserve/proxy.py` (QLever
-backend), `kgserve/sync.py` (daemon),
-`kgserve/ld/` (linked-data server). The only dependency is `rdflib`, used by the
-linked-data server and `init`; the sync itself needs only the standard library.
+Code layout:
+
+* `kgserve/config.py`: `config.json`.
+* `kgserve/zenodo.py`: the Zenodo API.
+* `kgserve/rdffiles.py`: formats and archives.
+* `kgserve/backends.py`: loading into the store.
+* `kgserve/hashindex.py`: hash IRIs, collected while loading.
+* `kgserve/sync.py`: the sync service.
+* `kgserve/ld/`: the linked-data server.
+
+The choice of components is discussed in [docs/alternatives.md](docs/alternatives.md).

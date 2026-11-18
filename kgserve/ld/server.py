@@ -12,9 +12,10 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 from .. import __version__
-from ..config import LDConfig
+from ..config import Config
 from .describe import FORMATS, Store, negotiate
-from .render import WELL_KNOWN_PREFIXES, Page, ResourceRenderer, error_page, esc, landing, not_found, sparql_editor
+from .render import (WELL_KNOWN_PREFIXES, Page, ResourceRenderer, error_page, esc, landing, not_found,
+                     root_prefix, sparql_editor)
 
 log = logging.getLogger(__name__)
 
@@ -47,9 +48,9 @@ class JSONFile:
 
 
 class App:
-    def __init__(self, config: LDConfig):
+    def __init__(self, config: Config):
         self.config = config
-        self.store = Store(config.sparql_endpoint)
+        self.store = Store(config.store.query, auth=config.store.auth)
         self.state = JSONFile(config.data_dir / "state.json", {})
         self.hash_index = JSONFile(config.data_dir / "hash-index.json", {})
 
@@ -59,7 +60,7 @@ class App:
         spaces = self.state.get().get("uri_spaces") or []
         return spaces[0] if spaces else ""
 
-    def page(self, title: str | None = None) -> Page:
+    def page(self, root: str, title: str | None = None) -> Page:
         state = self.state.get()
         record = state.get("record") or {}
         kg_title = self.config.title or record.get("title") or "Knowledge graph"
@@ -71,9 +72,9 @@ class App:
         if record.get("license"):
             footer_bits.append(esc(record["license"]))
         footer_bits.append(f'served by <a href="https://github.com/miguel76/knowledge-graph-serve">kgserve</a> {__version__}')
-        return Page(title=title or kg_title, kg_title=kg_title, base_path=self.config.base_path,
+        return Page(title=title or kg_title, kg_title=kg_title, root=root,
                     resource_path=self.config.resource_path, base_iri=self.base_iri(),
-                    sparql_url=self.config.public_sparql_url, footer=" · ".join(footer_bits))
+                    footer=" · ".join(footer_bits))
 
     def store_tag(self) -> str:
         return str((self.state.get().get("store") or {}).get("tag", ""))
@@ -105,6 +106,9 @@ class Handler(BaseHTTPRequestHandler):
     def redirect(self, location: str, status: int = HTTPStatus.MOVED_PERMANENTLY) -> None:
         self.send(status, "", "text/plain", {"Location": location})
 
+    def page(self, title: str | None = None) -> Page:
+        return self.app.page(root_prefix(self.path), title)
+
     def languages(self) -> list[str]:
         langs = []
         for part in (self.headers.get("Accept-Language") or "").split(","):
@@ -121,11 +125,11 @@ class Handler(BaseHTTPRequestHandler):
             self.route()
         except (ConnectionError, TimeoutError) as err:
             log.warning("SPARQL endpoint unavailable: %s", err)
-            self.send(503, error_page(self.app.page(), "The SPARQL endpoint is not available right now "
+            self.send(503, error_page(self.page(), "The SPARQL endpoint is not available right now "
                                                         "(it may be loading a new release)."), headers={"Retry-After": "60"})
         except Exception as err:  # noqa: BLE001
             log.exception("Error handling %s", self.path)
-            self.send(500, error_page(self.app.page(), f"Internal error: {err}"))
+            self.send(500, error_page(self.page(), f"Internal error: {err}"))
 
     # -- routes ---------------------------------------------------------------------------
 
@@ -134,46 +138,46 @@ class Handler(BaseHTTPRequestHandler):
         cfg = app.config
         path, _, query_string = self.path.partition("?")
         query = urllib.parse.parse_qs(query_string)
-        base = cfg.base_path
+        # All paths are relative to the service root: a front proxy can mount it anywhere.
         if path == "/healthz":
             return self.send(200, "ok", "text/plain")
-        if path == base or path == "":
-            return self.redirect(base + "/")
-        if path == base + "/":
-            return self.send(200, landing(app.page(), app.state.get(), app.base_iri()))
-        if path == base + "/sparql-ui":
-            return self.redirect(base + "/sparql-ui/" + (f"?{query_string}" if query_string else ""))
-        if path == base + "/sparql-ui/":
-            return self.send(200, sparql_editor(app.page("SPARQL editor"), EXAMPLE_QUERY))
-        if path == base + "/status.json":
+        if path == "/":
+            return self.send(200, landing(self.page(), app.state.get(), app.base_iri()))
+        if path == "/sparql-ui":
+            return self.redirect("sparql-ui/" + (f"?{query_string}" if query_string else ""))
+        if path == "/sparql-ui/":
+            return self.send(200, sparql_editor(self.page("SPARQL editor"), EXAMPLE_QUERY))
+        if path == "/status.json":
             return self.send(200, json.dumps(app.state.get(), indent=2), "application/json")
-        if path == base + "/browse":
+        if path == "/browse":
             iri = (query.get("iri") or [""])[0]
             if not re.match(r"^[a-zA-Z][a-zA-Z0-9+.-]*:[^\s<>\"{}|\\^`]*$", iri):
-                return self.send(400, error_page(app.page(), "Expected an absolute IRI in the 'iri' parameter."))
+                return self.send(400, error_page(self.page(), "Expected an absolute IRI in the 'iri' parameter."))
             fmt = (query.get("format") or [None])[0]
-            return self.resource(iri, fmt, lambda f: app.page().browse_url(iri, f))
-        if path.startswith(cfg.resource_path):
-            rest = path[len(cfg.resource_path):]
+            return self.resource(iri, fmt, lambda f: self.page().browse_url(iri, f))
+        prefix = f"/{cfg.resource_path}/"
+        if path.startswith(prefix):
+            rest = path[len(prefix):]
             base_iri = app.base_iri()
             if not base_iri:
-                return self.send(404, not_found(app.page(), path, "The IRI namespace of this knowledge graph "
-                                                                   "is not configured (KG_BASE_IRI)."))
+                return self.send(404, not_found(self.page(), path, "The IRI namespace of this knowledge graph is "
+                                                                   'unknown: set "baseIri" in config.json.'))
             fmt = (query.get("format") or [None])[0]
             candidates = [(base_iri + rest, fmt)]
             match = EXTENSION_RE.match(rest)
             if match and not fmt:
                 # ".../x.ttl": the resource ".../x" in Turtle, unless ".../x.ttl" itself exists.
                 candidates.append((base_iri + match.group(1), match.group(2)))
-            public = cfg.resource_path
             for i, (iri, candidate_fmt) in enumerate(candidates):
                 last = i == len(candidates) - 1
-                done = self.resource(iri, candidate_fmt, lambda f, iri=iri: f"{public}{iri[len(base_iri):]}?format={f}",
+                # Relative link to a format of the resource: "./<last path segment>?format=..."
+                segment = iri[len(base_iri):].rsplit("/", 1)[-1]
+                done = self.resource(iri, candidate_fmt, lambda f, seg=segment: f"./{seg}?format={f}",
                                      respond_not_found=last)
                 if done:
                     return
             return
-        self.send(404, not_found(app.page(), path, "No such page."))
+        self.send(404, not_found(self.page(), path, "No such page."))
 
     def resource(self, iri: str, fmt: str | None, format_url, respond_not_found: bool = True) -> bool:
         """Describe ``iri``; returns False (without responding) if not found and not ``respond_not_found``."""
@@ -210,7 +214,7 @@ class Handler(BaseHTTPRequestHandler):
             if not respond_not_found:
                 return False
             if fmt == "html":
-                self.send(404, not_found(app.page("Not found"), iri))
+                self.send(404, not_found(self.page("Not found"), iri))
             else:
                 self.send(404, f"No data about <{iri}>\n", "text/plain")
             return True
@@ -218,7 +222,7 @@ class Handler(BaseHTTPRequestHandler):
         if fmt == "html":
             app.store.add_inverse(desc, app.config.inverse_limit)
             app.store.add_labels(desc)
-            renderer = ResourceRenderer(app.page(), desc, self.languages())
+            renderer = ResourceRenderer(self.page(), desc, self.languages())
             renderer.page.title = f"{renderer.name(iri)} · {renderer.page.kg_title}"
             self.send(200, renderer.render(format_url), headers=headers)
         else:
@@ -228,10 +232,10 @@ class Handler(BaseHTTPRequestHandler):
         return True
 
 
-def serve(config: LDConfig) -> None:
+def serve(config: Config, host: str = "0.0.0.0", port: int = 8000) -> None:
     Handler.app = App(config)
-    server = ThreadingHTTPServer((config.bind, config.port), Handler)
+    server = ThreadingHTTPServer((host, port), Handler)
     server.daemon_threads = True
-    log.info("Linked data server on %s:%s (resources at %s, SPARQL %s)", config.bind, config.port,
-             config.resource_path, config.sparql_endpoint)
+    log.info("Linked data server on %s:%s (resources at /%s/, SPARQL %s)", host, port,
+             config.resource_path, config.store.query)
     server.serve_forever()

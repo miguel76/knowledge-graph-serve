@@ -1,10 +1,7 @@
-.env
+config.json
 data/
-graphdb-data/
-fuseki-data/
-certbot/
+graphdb.license
 __pycache__/
 *.egg-info/
 build/
 .pytest_cache/
-graphdb.license
