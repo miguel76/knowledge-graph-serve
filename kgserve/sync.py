@@ -21,6 +21,24 @@ log = logging.getLogger(__name__)
 VOID = "http://rdfs.org/ns/void#"
 
 
+# With SYNC_INTERVAL=0 (no periodic checks), retries after failures are still made, at most
+# this far apart.
+MAX_RETRY_WAIT = 6 * 3600
+
+
+def next_wait(interval: int, retry_interval: int, failures: int) -> int:
+    """Seconds to wait before the next check (0: no scheduled check, wait for a signal).
+
+    After ``failures`` consecutive failed checks, retry sooner than the regular interval:
+    ``retry_interval`` after the first failure, doubling at each further failure, never
+    beyond the regular interval (or ``MAX_RETRY_WAIT`` when there is none).
+    """
+    if failures <= 0 or retry_interval <= 0:
+        return interval
+    cap = interval if interval > 0 else MAX_RETRY_WAIT
+    return min(retry_interval * 2 ** min(failures - 1, 30), cap)
+
+
 def now() -> str:
     return dt.datetime.now(dt.timezone.utc).replace(microsecond=0).isoformat()
 
@@ -75,6 +93,9 @@ def describe_store(backend: Backend) -> dict:
 
 
 class Syncer:
+    #: How often the waiting loop wakes up to supervise the store and look at signals.
+    poll_seconds: float = 5
+
     def __init__(self, config: SyncConfig):
         self.config = config
         self.zenodo = Zenodo(config.zenodo_api, config.zenodo_token)
@@ -84,6 +105,7 @@ class Syncer:
         self.check_now = threading.Event()  # SIGHUP: check Zenodo now
         self.reload = threading.Event()  # SIGUSR1: reload the current release even if up to date
         self.stop = threading.Event()
+        self.failures = 0  # consecutive failed checks
 
     def sync_once(self, force: bool = False) -> bool:
         """Check Zenodo and load a new release if there is one. Returns True if data changed."""
@@ -144,19 +166,28 @@ class Syncer:
         os.replace(tmp, path)
         log.info("Hash IRI index: %d documents", len(index))
 
-    def _safe_sync(self, force: bool) -> None:
+    def _safe_sync(self, force: bool) -> bool:
+        """Run one check; on failure keep the current data online. Returns True on success."""
         try:
             self.sync_once(force)
         except Exception as err:  # noqa: BLE001 - keep the daemon (and the current data) alive
-            log.exception("Sync failed")
+            self.failures += 1
+            log.exception("Sync failed (%d consecutive failure%s)", self.failures, "s" if self.failures > 1 else "")
             self.state.update(status="error" if not self.state.data.get("store") else "ok",
-                              last_error=f"{now()}: {err}", syncing_record=None)
+                              last_error=f"{now()}: {err}", syncing_record=None, failures=self.failures)
+            return False
+        if self.failures:
+            log.info("Sync succeeded after %d failed attempt%s", self.failures, "s" if self.failures > 1 else "")
+        self.failures = 0
+        self.state.update(failures=0)
+        return True
 
     def run(self, once: bool = False, force: bool = False) -> None:
-        signal.signal(signal.SIGHUP, lambda *_: self.check_now.set())
-        signal.signal(signal.SIGUSR1, lambda *_: (self.reload.set(), self.check_now.set()))
-        signal.signal(signal.SIGTERM, lambda *_: self.stop.set())
-        signal.signal(signal.SIGINT, lambda *_: self.stop.set())
+        if threading.current_thread() is threading.main_thread():  # not in tests' worker threads
+            signal.signal(signal.SIGHUP, lambda *_: self.check_now.set())
+            signal.signal(signal.SIGUSR1, lambda *_: (self.reload.set(), self.check_now.set()))
+            signal.signal(signal.SIGTERM, lambda *_: self.stop.set())
+            signal.signal(signal.SIGINT, lambda *_: self.stop.set())
         try:
             if not once:
                 self.backend.resume(self.state.data)
@@ -164,13 +195,15 @@ class Syncer:
             if once:
                 return
             while not self.stop.is_set():
-                interval = self.config.interval
-                next_check = dt.datetime.now(dt.timezone.utc) + dt.timedelta(seconds=interval)
-                self.state.update(next_check=next_check.replace(microsecond=0).isoformat() if interval > 0 else None)
+                wait = next_wait(self.config.interval, self.config.retry_interval, self.failures)
+                if self.failures and wait > 0:
+                    log.info("Retrying in %ss", wait)
+                next_check = dt.datetime.now(dt.timezone.utc) + dt.timedelta(seconds=wait)
+                self.state.update(next_check=next_check.replace(microsecond=0).isoformat() if wait > 0 else None)
                 waited = 0
-                while not self.stop.is_set() and not self.check_now.is_set() and (interval <= 0 or waited < interval):
-                    self.stop.wait(5)
-                    waited += 5
+                while not self.stop.is_set() and not self.check_now.is_set() and (wait <= 0 or waited < wait):
+                    self.stop.wait(self.poll_seconds)
+                    waited += self.poll_seconds
                     self.backend.check()
                 if self.stop.is_set():
                     break

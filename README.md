@@ -30,7 +30,8 @@ choices is in [docs/alternatives.md](docs/alternatives.md).
            └───────────────────────────────────┘         └──────────────────────┘
 ```
 
-* **Sync** (`kgserve sync`): checks the record every `SYNC_INTERVAL` seconds. A concept DOI
+* **Sync** (`kgserve sync`): a long-running process that checks the record every
+  `SYNC_INTERVAL` seconds (no cron needed), and retries sooner after a failure. A concept DOI
   always resolves to the latest version. When there is a new version it downloads the RDF
   files (`.nt .nq .ttl .trig .rdf .owl .jsonld .n3`, optionally `.gz/.bz2/.xz`, or `.zip`
   archives of them), verifies their checksums and loads them. Quad files keep their named
@@ -114,6 +115,7 @@ for the full list. The main ones:
 | `KG_FILES`, `KG_EXCLUDE_FILES` | all RDF files | glob patterns of the record files to load |
 | `TRIPLES_GRAPH` | `https://doi.org/{conceptdoi}#{key}` | named graph of triple files (`default` for the default graph) |
 | `SYNC_INTERVAL` | `3600` | seconds between checks (`0`: only on start and on demand) |
+| `SYNC_RETRY_INTERVAL` | `300` | after a failed check, retry this soon, doubling on each further failure up to `SYNC_INTERVAL` (`0`: no early retries) |
 | `PUBLIC_URL` | `http://localhost:8080` | public origin, used in the pages |
 | `BASE_PATH` | `/kg` | path of the service |
 | `RESOURCE_PATH` | `{BASE_PATH}/id` | path where the IRIs are dereferenced |

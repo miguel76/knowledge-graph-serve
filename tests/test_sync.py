@@ -154,3 +154,84 @@ def test_sync_once(tmp_path, monkeypatch):
     syncer.config.include = ["kg.nq.gz"]
     assert syncer.sync_once() is True
     assert syncer.backend.loads[-1] == ["kg.nq.gz"]
+
+
+@pytest.mark.parametrize("interval,retry,failures,expected", [
+    (3600, 300, 0, 3600),  # no failure: regular interval
+    (3600, 300, 1, 300),  # first retry
+    (3600, 300, 2, 600),  # doubling
+    (3600, 300, 4, 2400),
+    (3600, 300, 5, 3600),  # capped at the regular interval
+    (3600, 300, 500, 3600),  # no overflow
+    (600, 900, 1, 600),  # retry longer than the interval: interval wins
+    (3600, 0, 3, 3600),  # retries disabled
+    (0, 300, 0, 0),  # manual mode, no failure: wait for a signal
+    (0, 300, 2, 600),  # manual mode still retries failures
+    (0, 300, 99, 6 * 3600),  # ... at most every 6 hours
+])
+def test_next_wait(interval, retry, failures, expected):
+    from kgserve.sync import next_wait
+
+    assert next_wait(interval, retry, failures) == expected
+
+
+class FlakyZenodo(FakeZenodo):
+    """Fails the first ``failures`` record lookups, as if Zenodo were down."""
+
+    def __init__(self, record, failures):
+        super().__init__(record)
+        self.failures = failures
+        self.calls = 0
+
+    def record(self, ref, follow_latest=True):
+        self.calls += 1
+        if self.calls <= self.failures:
+            raise OSError("Zenodo is unreachable")
+        return self.record_data
+
+
+def test_failed_sync_is_retried_sooner(tmp_path, monkeypatch):
+    import threading
+    import time
+
+    record = ZenodoRecord.from_api(json.loads((HERE / "zenodo_record.json").read_text()))
+    monkeypatch.setattr("kgserve.sync.describe_store", lambda backend: {})
+    config = SyncConfig(record="24305088", data_dir=tmp_path, interval=3600, retry_interval=1)
+    syncer = Syncer(config)
+    syncer.poll_seconds = 0.05
+    syncer.zenodo = FlakyZenodo(record, failures=2)
+    syncer.backend = FakeBackend()
+    syncer.backend.shutdown = lambda: None
+    syncer.backend.check = lambda: None
+    syncer.backend.resume = lambda state: None
+
+    thread = threading.Thread(target=syncer.run)
+    thread.start()
+    try:
+        # Fails at start-up, retries after 1 s, fails again, retries after 2 s, then loads.
+        deadline = time.monotonic() + 15
+        while not syncer.backend.loads and time.monotonic() < deadline:
+            time.sleep(0.05)
+        assert syncer.backend.loads, "the sync was not retried"
+        assert syncer.zenodo.calls == 3
+        time.sleep(0.2)
+        state = json.loads((tmp_path / "state.json").read_text())
+        assert state["failures"] == 0 and state["status"] == "ok"
+        assert syncer.failures == 0
+    finally:
+        syncer.stop.set()
+        thread.join(5)
+    assert not thread.is_alive()
+
+
+def test_failure_state(tmp_path, monkeypatch):
+    record = ZenodoRecord.from_api(json.loads((HERE / "zenodo_record.json").read_text()))
+    syncer = Syncer(SyncConfig(record="24305088", data_dir=tmp_path))
+    syncer.zenodo = FlakyZenodo(record, failures=5)
+    syncer.backend = FakeBackend()
+    assert syncer._safe_sync(False) is False
+    assert syncer._safe_sync(False) is False
+    state = json.loads((tmp_path / "state.json").read_text())
+    assert state["failures"] == 2
+    assert "Zenodo is unreachable" in state["last_error"]
+    assert state["status"] == "error"  # nothing loaded yet
