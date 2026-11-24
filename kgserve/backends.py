@@ -113,7 +113,9 @@ class Store:
         A Jena inference graph keeps its deductions and does not see what is written through
         another service. Aborting a write transaction on it discards them (``rebind``). This
         update is refused (the union graph is read-only), which aborts it. Then a first query
-        computes the deductions, here rather than on a user's query.
+        prepares the reasoner (its schema closure), here rather than on a user's query. It asks
+        about one subject: an open pattern such as ``?s ?p ?o`` would make the backward engine
+        table every deduction (minutes and gigabytes on millions of statements).
         """
         service = self.config.inference_service.rstrip("/")
         if not service:
@@ -123,7 +125,7 @@ class Store:
         http.request("POST", f"{service}/update", body, headers, auth=self.auth, timeout=600, ok=(200, 204, 403))
         started = time.monotonic()
         try:
-            http.sparql(f"{service}/sparql", "ASK { ?s ?p ?o }", auth=self.auth, timeout=3600)
+            http.sparql(f"{service}/sparql", "ASK { <urn:x-kgserve:warm-up> a ?class }", auth=self.auth, timeout=3600)
             log.info("Inference %s ready in %.1f s", self.inference, time.monotonic() - started)
         except Exception as err:  # noqa: BLE001 - the first user query will compute them instead
             log.warning("Inference %s: first query failed (%s)", self.inference, err)

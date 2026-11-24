@@ -185,13 +185,16 @@ offer stops the services with an error.
 * **Fuseki** infers at query time, with a Jena reasoner over the union of the graphs.
   There, the inferences are in the default graph only: named graphs (`GRAPH`) and the text
   index (`text:query`) are not available with inference, but are with `infer=false`. After
-  each load, the sync makes the reasoner start again from the new release, and asks it a
-  first query (the reasoner computes part of its deductions then, which may take a while on
-  large graphs). The store reads the regime when it starts, so restart it too after editing
-  `config.json`: `docker compose restart store sync linked-data`. Until then, the sync
-  reports that the store does not serve the configured regime. Jena's reasoners work in
-  memory: `rdfs` and `transitive` are workable on millions of statements, the OWL
-  reasoners only on small graphs.
+  each load, the sync makes the reasoner start again from the new release. The store reads
+  the regime when it starts, so restart it too after editing `config.json`:
+  `docker compose restart store sync linked-data`. Until then, the sync reports that the
+  store does not serve the configured regime. Jena's reasoners work in memory, and the
+  query timeout does not stop them. With `rdfs` on the CCKG (5.7M statements), looking up a
+  resource takes milliseconds, but a query over the whole graph (e.g. counting the instances
+  of each class) took 4.5 minutes and 4 GB of heap, and the memory stays in use until the
+  next load or restart. Give the store enough memory (`JDK_JAVA_OPTIONS` in
+  `compose.fuseki.yaml`), and prefer GraphDB for a large graph on a public endpoint. The
+  OWL reasoners are only workable on small graphs.
 
 With inference, add `infer=false` to the URL of the SPARQL endpoint (e.g.
 `/sparql?infer=false&query=...`) to query the explicit statements only. The resource pages,

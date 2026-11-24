@@ -15,7 +15,8 @@ services:
       ENABLE_DATA_WRITE: "true"
       ENABLE_UPDATE: "true"
       QUERY_TIMEOUT: "60000"
-      JAVA_OPTIONS: -Xmx4g
+      # Read by the java launcher (the image's command ignores JAVA_OPTIONS).
+      JDK_JAVA_OPTIONS: -Xmx4g
     volumes: !override
       - ./data/store:/fuseki-base/databases
       - ./config.json:/config/config.json:ro
