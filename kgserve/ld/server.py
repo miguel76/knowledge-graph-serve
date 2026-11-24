@@ -50,7 +50,8 @@ class JSONFile:
 class App:
     def __init__(self, config: Config):
         self.config = config
-        self.store = Store(config.store.query, auth=config.store.auth)
+        # Resource descriptions show the explicit statements, with their graphs.
+        self.store = Store(config.store.explicit_query, auth=config.store.auth)
         self.state = JSONFile(config.data_dir / "state.json", {})
         self.hash_index = JSONFile(config.data_dir / "hash-index.json", {})
 
@@ -237,5 +238,5 @@ def serve(config: Config, host: str = "0.0.0.0", port: int = 8000) -> None:
     server = ThreadingHTTPServer((host, port), Handler)
     server.daemon_threads = True
     log.info("Linked data server on %s:%s (resources at /%s/, SPARQL %s)", host, port,
-             config.resource_path, config.store.query)
+             config.resource_path, config.store.explicit_query)
     server.serve_forever()

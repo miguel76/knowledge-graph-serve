@@ -118,6 +118,13 @@ class FakeStore:
     def __init__(self):
         self.loads = []
         self.empty = False
+        self.serves_inference = True
+
+    def wait_until_up(self):
+        pass
+
+    def check_inference(self):
+        return self.serves_inference
 
     def load(self, items, tap=None):
         self.loads.append([item.key for item in items])
@@ -165,6 +172,30 @@ def test_sync_once(tmp_path, monkeypatch):
     assert syncer.sync_once() is False
     syncer.store.empty = True
     assert syncer.sync_once() is True
+
+    # Another inference regime, or a store not serving it (GraphDB: another ruleset): reload.
+    assert json.loads((tmp_path / "state.json").read_text())["inference"] == "none"
+    syncer.config.inference = "rdfs"
+    assert syncer.sync_once() is True
+    assert json.loads((tmp_path / "state.json").read_text())["inference"] == "rdfs"
+    assert syncer.sync_once() is False
+    syncer.store.serves_inference = False
+    assert syncer.sync_once() is True
+
+
+def test_state_without_inference_is_up_to_date(tmp_path, monkeypatch):
+    # State written before the "inference" option: no reload when it is not set.
+    record = ZenodoRecord.from_api(json.loads((HERE / "zenodo_record.json").read_text()))
+    monkeypatch.setattr("kgserve.sync.describe_store", lambda store: {})
+    syncer = Syncer(Config(zenodo="24305088", data_dir=tmp_path))
+    syncer.zenodo = FakeZenodo(record)
+    syncer.store = FakeStore()
+    assert syncer.sync_once() is True
+    state = json.loads((tmp_path / "state.json").read_text())
+    del state["inference"]
+    (tmp_path / "state.json").write_text(json.dumps(state))
+    syncer.state.data = state
+    assert syncer.sync_once() is False
 
 
 @pytest.mark.parametrize("interval,retry,failures,expected", [
@@ -264,6 +295,7 @@ def test_config_file(tmp_path, monkeypatch):
     ('{"zenodo": "1", "syncInterval": "1h"}', "must be a int"),
     ('{"zenodo": "1", "followLatest": 1}', "must be a bool"),
     ('{"zenodo": "1", "files": "*.nq"}', "must be a list"),
+    ('{"zenodo": "1", "inference": "rdfs"}', "not offered by oxigraph.*offered by graphdb and fuseki"),
     ('{"zenodo": "1",}', "not valid JSON"),
     ("[]", "JSON object"),
 ])
@@ -281,12 +313,35 @@ def test_config_missing_file_mounted_as_directory(tmp_path):
         Config.load(tmp_path / "config.json")
 
 
+@pytest.mark.parametrize("kind,inference,ok", [
+    ("oxigraph", "none", True),
+    ("graphdb", "owl2-rl-optimized", True),
+    ("graphdb", "RDFSPlus", True),  # case-insensitive
+    ("graphdb", "owl-micro", False),
+    ("fuseki", "owl-micro", True),
+    ("fuseki", "owl2-rl", False),
+])
+def test_inference_regimes(kind, inference, ok):
+    store = StoreConfig(type=kind)
+    if ok:
+        assert Config.from_dict({"zenodo": "1", "inference": inference}, store).inference == inference.lower()
+    else:
+        with pytest.raises(ConfigError, match=f"not offered by {kind}"):
+            Config.from_dict({"zenodo": "1", "inference": inference}, store)
+
+
 def test_store_defaults(monkeypatch):
     monkeypatch.setenv("KG_STORE_TYPE", "graphdb")
     monkeypatch.setenv("KG_STORE_REPOSITORY", "cckg")
     store = StoreConfig.from_env()
     assert store.query == "http://store:7200/repositories/cckg"
+    assert store.explicit_query == "http://store:7200/repositories/cckg?infer=false"
     assert store.data == "http://store:7200"
+    assert store.inference_service == ""
+    monkeypatch.setenv("KG_STORE_TYPE", "fuseki")
+    store = StoreConfig.from_env()
+    assert store.explicit_query == store.query == "http://store:3030/ds/sparql"
+    assert store.inference_service == "http://store:3030/kg"
     monkeypatch.setenv("KG_STORE_TYPE", "nope")
     with pytest.raises(ConfigError):
         StoreConfig.from_env()

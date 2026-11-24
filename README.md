@@ -18,7 +18,7 @@ docker compose up -d --build
 | Path | What |
 | --- | --- |
 | `/` | landing page: dataset metadata (from Zenodo), statistics, named graphs, sync status |
-| `/sparql` | SPARQL endpoint (query only, GET/POST, CORS); browsers are sent to the editor |
+| `/sparql` | SPARQL endpoint (query only, GET/POST, CORS), with [inference](#inference) if chosen; browsers are sent to the editor |
 | `/sparql-ui/` | SPARQL editor ([Matdata-eu's YASGUI](https://github.com/Matdata-eu/yasgui), as in the `mathiasvda/yasgui` image; `?query=` pre-fills it) |
 | `/id/<path>` | the resource `<baseIri><path>`: HTML page, or by content negotiation Turtle, N-Triples, JSON-LD, RDF/XML, N3, N-Quads, TriG (`?format=ttl` or `.ttl` also work) |
 | `/browse?iri=<IRI>` | any other IRI in the graph (e.g. ontology terms) |
@@ -79,6 +79,7 @@ Everything about the knowledge graph is in `config.json`, next to `compose.yaml`
 | `retryInterval` | `300` | after a failed check, retry this soon, doubling on each further failure up to `syncInterval` (`0`: no early retries) |
 | `describeLimit` | `5000` | maximum statements in a resource description |
 | `inverseLimit` | `50` | maximum incoming links shown on a resource page |
+| `inference` | `"none"` | inference regime of the SPARQL endpoint, among those of the store (see [Inference](#inference)) |
 | `zenodoApi` | `"https://zenodo.org/api"` | e.g. the Zenodo sandbox |
 | `zenodoToken` | none | access token, only for restricted records |
 
@@ -154,8 +155,47 @@ The store is replaced by adding a compose file:
 Any store that supports SPARQL Update and the Graph Store Protocol works the same way.
 Point the services at it with `KG_STORE_TYPE` (`oxigraph`, `fuseki` or `graphdb`, which
 select default endpoints), or explicitly with `KG_STORE_QUERY`, `KG_STORE_UPDATE`,
-`KG_STORE_DATA`, `KG_STORE_USER` and `KG_STORE_PASSWORD`, and set `SPARQL_UPSTREAM` for
-nginx (see the two override files).
+`KG_STORE_DATA`, `KG_STORE_INFERENCE` (Fuseki's inference service), `KG_STORE_USER` and
+`KG_STORE_PASSWORD`, and set `SPARQL_UPSTREAM` and `SPARQL_UPSTREAM_EXPLICIT` (without
+inference) for nginx (see the two override files).
+
+## Inference
+
+With GraphDB or Fuseki, the SPARQL endpoint can answer with the statements that the
+knowledge graph entails, under an inference regime chosen with `inference` in
+`config.json`:
+
+```json
+{"zenodo": "10.5281/zenodo.24305088", "inference": "rdfs"}
+```
+
+| Store | Regimes |
+| --- | --- |
+| GraphDB | its [rulesets](https://graphdb.ontotext.com/documentation/11.0/reasoning.html#predefined-rulesets): `rdfs`, `rdfsplus`, `owl-horst`, `owl-max`, `owl2-ql`, `owl2-rl`, and the same names with `-optimized` |
+| Fuseki | Jena's [reasoners](https://jena.apache.org/documentation/inference/): `rdfs`, `transitive` (`rdfs:subClassOf` and `rdfs:subPropertyOf` only), `owl-micro`, `owl-mini`, `owl` |
+| Oxigraph | none |
+
+`none` (the default) means explicit statements only. A regime that the store does not
+offer stops the services with an error.
+
+* **GraphDB** materialises the inferences when it loads a release: queries stay fast, the
+  load takes longer. The ruleset is set when the repository is created, so when it changes,
+  the sync recreates the repository and loads the release again. Restart the sync after
+  editing `config.json`: `docker compose restart sync linked-data`.
+* **Fuseki** infers at query time, with a Jena reasoner over the union of the graphs.
+  There, the inferences are in the default graph only: named graphs (`GRAPH`) and the text
+  index (`text:query`) are not available with inference, but are with `infer=false`. After
+  each load, the sync makes the reasoner start again from the new release, and asks it a
+  first query (the reasoner computes part of its deductions then, which may take a while on
+  large graphs). The store reads the regime when it starts, so restart it too after editing
+  `config.json`: `docker compose restart store sync linked-data`. Until then, the sync
+  reports that the store does not serve the configured regime. Jena's reasoners work in
+  memory: `rdfs` and `transitive` are workable on millions of statements, the OWL
+  reasoners only on small graphs.
+
+With inference, add `infer=false` to the URL of the SPARQL endpoint (e.g.
+`/sparql?infer=false&query=...`) to query the explicit statements only. The resource pages,
+RDF serialisations and statistics always show the explicit statements, with their graphs.
 
 ## Operations
 
@@ -201,9 +241,10 @@ Code layout:
 * `kgserve/config.py`: `config.json`.
 * `kgserve/zenodo.py`: the Zenodo API.
 * `kgserve/rdffiles.py`: formats and archives.
-* `kgserve/backends.py`: loading into the store.
+* `kgserve/backends.py`: loading into the store, inference.
 * `kgserve/hashindex.py`: hash IRIs, collected while loading.
 * `kgserve/sync.py`: the sync service.
 * `kgserve/ld/`: the linked-data server.
+* `fuseki/entrypoint.sh`: Fuseki's inference service, from `config.json`.
 
 The choice of components is discussed in [docs/alternatives.md](docs/alternatives.md).

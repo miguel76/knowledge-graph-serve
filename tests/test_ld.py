@@ -189,6 +189,15 @@ def test_pages(ld):
     assert json.loads(body)["status"] == "ok"
 
 
+def test_landing_shows_inference(ld, tmp_path):
+    base, _ = ld
+    assert "Inference" not in get(base + "/", "text/html")[2]
+    state = json.loads((tmp_path / "state.json").read_text())
+    (tmp_path / "state.json").write_text(json.dumps({**state, "inference": "owl2-rl"}))
+    body = get(base + "/", "text/html")[2]
+    assert "<code>owl2-rl</code>" in body and "infer=false" in body
+
+
 @pytest.mark.parametrize("path,expected", [
     ("/", "./"), ("/browse?iri=x", "./"), ("/sparql-ui/", "../"), ("/id/a", "../"),
     ("/id/a/b/c", "../../../"), ("/id/a/?format=ttl", "../../"),

@@ -1,11 +1,15 @@
 # Use Apache Jena Fuseki (TDB, union default graph, Lucene index on labels) as the store:
 #   docker compose -f compose.yaml -f compose.fuseki.yaml up -d
-# Only its query endpoint is reachable from outside (through nginx).
+# Only its query endpoints are reachable from outside (through nginx): the service "kg",
+# with the inference regime of config.json ("inference"), and, with infer=false, "ds".
+# fuseki/entrypoint.sh reads the regime when the store starts: restart it after a change.
 
 services:
   store:
     image: secoresearch/fuseki:6.2.0
-    command: !reset []
+    entrypoint: ["/bin/bash", "/kgserve/entrypoint.sh"]
+    # The image's command (an entrypoint set here clears it).
+    command: ["java", "-cp", "*:/javalibs/*", "org.apache.jena.fuseki.main.cmds.FusekiServerCmd"]
     environment:
       ADMIN_PASSWORD: ${FUSEKI_ADMIN_PASSWORD:-change-me}
       ENABLE_DATA_WRITE: "true"
@@ -14,6 +18,8 @@ services:
       JAVA_OPTIONS: -Xmx4g
     volumes: !override
       - ./data/store:/fuseki-base/databases
+      - ./config.json:/config/config.json:ro
+      - ./fuseki/entrypoint.sh:/kgserve/entrypoint.sh:ro
 
   sync:
     environment:
@@ -25,4 +31,5 @@ services:
 
   web:
     environment:
-      SPARQL_UPSTREAM: http://store:3030/ds/sparql
+      SPARQL_UPSTREAM: http://store:3030/kg/sparql
+      SPARQL_UPSTREAM_EXPLICIT: http://store:3030/ds/sparql

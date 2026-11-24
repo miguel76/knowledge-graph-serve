@@ -47,7 +47,9 @@ services:
     ports:
       - "${KG_LISTEN:-127.0.0.1:8080}:80"
     environment:
+      # The SPARQL endpoint, and the one for explicit statements only (?infer=false).
       SPARQL_UPSTREAM: http://store:7878/query
+      SPARQL_UPSTREAM_EXPLICIT: http://store:7878/query
     volumes:
       - ./nginx:/etc/nginx/templates:ro
     depends_on:

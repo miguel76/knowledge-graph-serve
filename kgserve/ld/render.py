@@ -394,6 +394,11 @@ def landing(page: Page, state: dict, base_iri: str) -> str:
     access = [("SPARQL endpoint", f'<code data-url="{esc(page.sparql_url)}">{esc(page.sparql_url)}</code>'),
               ("SPARQL editor", f'<a href="{esc(page.root)}sparql-ui/" data-url="{esc(page.root)}sparql-ui/">'
                                 f'{esc(page.root)}sparql-ui/</a>')]
+    inference = state.get("inference") or "none"
+    if inference != "none":
+        access.append(("Inference", f"<code>{esc(inference)}</code>: the SPARQL endpoint also answers with the "
+                                    "statements inferred under this regime. Add <code>infer=false</code> to its URL "
+                                    "for the explicit statements only (and their named graphs)."))
     if base_iri:
         resources = f"{page.root}{page.resource_path}/"
         access.append(("Linked data", f'IRIs starting with <code>{esc(base_iri)}</code> are served at '

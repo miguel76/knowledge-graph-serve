@@ -58,6 +58,16 @@ def request(
     return result
 
 
+def with_params(url: str, **params: str) -> str:
+    """Append query parameters to a URL that may already have some (kept as they are). An
+    empty value gives a bare key, as in the Graph Store Protocol's ``?default``."""
+    added = "&".join(urllib.parse.quote(k, safe="") + (f"={urllib.parse.quote(v, safe='')}" if v else "")
+                     for k, v in params.items())
+    if not added:
+        return url
+    return f"{url}{'&' if '?' in url else '?'}{added}"
+
+
 def form(fields: dict[str, str]) -> tuple[bytes, dict[str, str]]:
     return urllib.parse.urlencode(fields).encode(), {"Content-Type": "application/x-www-form-urlencoded"}
 
