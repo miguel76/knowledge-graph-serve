@@ -262,3 +262,7 @@ Code layout:
 * `fuseki/entrypoint.sh`: Fuseki's inference service, from `config.json`.
 
 The choice of components is discussed in [docs/alternatives.md](docs/alternatives.md).
+
+## Licence
+
+MIT (see [LICENSE](LICENSE)).
