@@ -20,7 +20,7 @@ docker compose up -d --build
 | `/` | landing page: dataset metadata (from Zenodo), statistics, named graphs, sync status |
 | `/sparql` | SPARQL endpoint (query only, GET/POST, CORS), with [inference](#inference) if chosen; browsers are sent to the editor |
 | `/sparql-ui/` | SPARQL editor ([Matdata-eu's YASGUI](https://github.com/Matdata-eu/yasgui), as in the `mathiasvda/yasgui` image; `?query=` pre-fills it) |
-| `/id/<path>` | the resource `<baseIri><path>`: HTML page, or by content negotiation Turtle, N-Triples, JSON-LD, RDF/XML, N3, N-Quads, TriG (`?format=ttl` or `.ttl` also work) |
+| `/id/<path>` | the resource `<baseIri><path>`: HTML page, or by content negotiation Turtle, N-Triples, JSON-LD, RDF/XML, N3, N-Quads, TriG (`?format=ttl` or `.ttl` also work); with inference, `?infer=false` for the explicit statements only |
 | `/browse?iri=<IRI>` | any other IRI in the graph (e.g. ontology terms) |
 | `/status.json` | synchronisation state |
 
@@ -197,8 +197,17 @@ offer stops the services with an error.
   OWL reasoners are only workable on small graphs.
 
 With inference, add `infer=false` to the URL of the SPARQL endpoint (e.g.
-`/sparql?infer=false&query=...`) to query the explicit statements only. The resource pages,
-RDF serialisations and statistics always show the explicit statements, with their graphs.
+`/sparql?infer=false&query=...`) to query the explicit statements only.
+
+The resource pages and RDF serialisations show the explicit statements, in their graphs,
+and the statements inferred about the resource, marked "inferred" (in N-Quads and TriG,
+they are in the default graph). The same `infer=false` shows the explicit statements only
+(e.g. `/id/x?infer=false`, `/id/x?format=ttl&infer=false`), and each page links to the
+other view. The inferred statements come from GraphDB's pseudo-graph
+`<http://www.ontotext.com/implicit>`, or from Fuseki's service `kg`, while the explicit
+ones come from the statements without inference (`infer=false` for GraphDB, the dataset
+`ds` for Fuseki). Inferred statements about blank nodes are not shown. The statistics on
+the landing page count the explicit statements.
 
 ## Operations
 

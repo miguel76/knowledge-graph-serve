@@ -12,7 +12,7 @@ from typing import Callable, Iterable
 from rdflib import BNode, Literal, URIRef
 from rdflib.namespace import RDF, XSD
 
-from .describe import FORMAT_LABELS, FORMATS, Description
+from .describe import FORMAT_LABELS, FORMATS, INFERRED_GRAPH, Description
 
 # Matdata-eu's YASGUI (https://github.com/Matdata-eu/yasgui), the one in the mathiasvda/yasgui
 # Docker image: themes, Font Awesome icons, graph/geo/chart result plugins.
@@ -82,6 +82,7 @@ table.nested{margin-top:4px;border-radius:6px}table.nested th{width:35%}
 table.graphs th{width:auto}table.graphs td{text-align:right;white-space:nowrap;width:1%}
 .tag{font-size:11px;color:var(--muted);background:var(--code);border-radius:4px;padding:0 5px;margin-left:6px;white-space:nowrap}
 .g{font-size:11px;color:var(--muted);margin-left:6px;cursor:help}
+.inf{font-style:italic}.chip.inf{background:none;border:1px dashed var(--line)}
 .ext{font-size:12px;margin-left:4px;color:var(--muted)}
 .formats{display:flex;flex-wrap:wrap;gap:8px;font-size:13px;margin:8px 0}
 .formats a{border:1px solid var(--line);border-radius:6px;padding:2px 8px;background:var(--card)}
@@ -192,7 +193,8 @@ class ResourceRenderer:
         self.index: dict[object, dict[str, dict[object, set[str]]]] = {}
         for s, p, o, g in desc.dataset.quads((None, None, None, None)):
             graph = str(g.identifier if hasattr(g, "identifier") else g)
-            self.graph_ids.setdefault(graph, len(self.graph_ids) + 1)
+            if graph != INFERRED_GRAPH:
+                self.graph_ids.setdefault(graph, len(self.graph_ids) + 1)
             self.index.setdefault(s, {}).setdefault(str(p), {}).setdefault(o, set()).add(graph)
 
     # -- labels ---------------------------------------------------------------------------
@@ -239,6 +241,8 @@ class ResourceRenderer:
         return text
 
     def graphs_badge(self, graphs: set[str]) -> str:
+        if INFERRED_GRAPH in graphs:
+            return f'<span class="g inf" title="Inferred ({esc(self.desc.inference)})">inferred</span>'
         if len(self.graph_ids) < 2:
             return ""
         ids = sorted(self.graph_ids[g] for g in graphs)
@@ -264,7 +268,9 @@ class ResourceRenderer:
         rows = []
         for p in self.ordered(self.index.get(subject, {})):
             values = self.index[subject][p]
-            items = "".join(f"<li>{self.value(o, g, depth, seen)}</li>" for o, g in sorted(values.items(), key=lambda kv: str(kv[0])))
+            # Explicit values first, then the inferred ones.
+            ordered = sorted(values.items(), key=lambda kv: (kv[1] == {INFERRED_GRAPH}, str(kv[0])))
+            items = "".join(f"<li>{self.value(o, g, depth, seen)}</li>" for o, g in ordered)
             rows.append(f'<tr><th>{self.iri_link(p)}</th><td><ul>{items}</ul></td></tr>')
         if not rows:
             return '<span class="muted">[blank node]</span>'
@@ -274,7 +280,12 @@ class ResourceRenderer:
 
     def subject_header(self, iri: str, level: str) -> str:
         props = self.index.get(URIRef(iri), {})
-        types = "".join(f'<span class="chip">{self.iri_link(str(t))}</span>' for t in sorted(props.get(TYPE, {}), key=str))
+        type_graphs = props.get(TYPE, {})
+        # Explicit types first; inferred ones (e.g. superclasses) after, set apart.
+        types = "".join(
+            f'<span class="chip inf" title="Inferred">{self.iri_link(str(t))}</span>' if INFERRED_GRAPH in type_graphs[t]
+            else f'<span class="chip">{self.iri_link(str(t))}</span>'
+            for t in sorted(type_graphs, key=lambda t: (INFERRED_GRAPH in type_graphs[t], str(t))))
         description = ""
         for p in DESCRIPTION_PROPERTIES:
             values = [o for o in props.get(p, {}) if isinstance(o, Literal)]
@@ -286,11 +297,21 @@ class ResourceRenderer:
         return (f'<{level}{anchor}>{esc(self.name(iri))}</{level}><div class="iri">{esc(iri)}</div>'
                 f'{f"<div class=chips>{types}</div>" if types else ""}{description}')
 
-    def render(self, format_url: Callable[[str], str]) -> str:
+    def render(self, format_url: Callable[[str], str], other_view: str | None = None) -> str:
+        """``other_view``: the page with (or without) the inferred statements, if the store infers."""
         main_iri = self.desc.iris[0]
         parts = [self.subject_header(main_iri, "h1")]
         formats = "".join(f'<a href="{esc(format_url(f))}" rel="alternate" type="{FORMATS[f][0]}">{FORMAT_LABELS[f]}</a>' for f in FORMATS)
         parts.append(f'<div class="formats"><span class="muted">Download:</span>{formats}</div>')
+        if other_view:
+            regime = f"<code>{esc(self.desc.inference)}</code>"
+            if self.desc.with_inferred:
+                view = (f'<span class="muted">Explicit and inferred statements ({regime}).</span>'
+                        f'<a href="{esc(other_view)}">Explicit statements only</a>')
+            else:
+                view = (f'<span class="muted">Explicit statements only.</span>'
+                        f'<a href="{esc(other_view)}">With inferred statements ({regime})</a>')
+            parts.append(f'<div class="formats">{view}</div>')
         if self.desc.truncated:
             parts.append('<div class="note">This description is truncated. Use the SPARQL endpoint to get all the data.</div>')
         if URIRef(main_iri) in self.index:
