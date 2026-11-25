@@ -222,6 +222,22 @@ def test_inferred_statements(ld):
     assert headers["ETag"] != get(base + "/id/a", "text/html")[1]["ETag"]
 
 
+def test_explicit_statements_by_default(ld):
+    base, store = ld
+    store.inference = "rdfs"
+    server.Handler.app.config.describe_inferred = False
+    status, _, body = get(base + "/id/a", "text/html")
+    assert status == 200 and "Animal" not in body and "Explicit statements only." in body
+    assert 'href="./a?format=html&amp;infer=true">With inferred statements' in body
+    assert 'href="./a?format=ttl"' in body
+    assert "Animal" not in get(base + "/id/a")[2] and "Animal" not in get(base + "/id/a?infer=false")[2]
+
+    status, _, body = get(base + "/id/a?infer=true", "text/html")
+    assert "Animal" in body and 'href="./a?format=html">Explicit statements only' in body
+    assert 'href="./a?format=ttl&amp;infer=true"' in body
+    assert "Animal" in get(base + "/id/a?format=ttl&infer=true")[2]
+
+
 def test_store_adds_inferred_statements(monkeypatch):
     from kgserve.ld.describe import InferenceSource, Store
     store = Store("http://explicit", inference=InferenceSource("owl2-rl", "http://inferring", "FROM <urn:implicit> "))

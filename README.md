@@ -20,7 +20,7 @@ docker compose up -d --build
 | `/` | landing page: dataset metadata (from Zenodo), statistics, named graphs, sync status |
 | `/sparql` | SPARQL endpoint (query only, GET/POST, CORS), with [inference](#inference) if chosen; browsers are sent to the editor |
 | `/sparql-ui/` | SPARQL editor ([Matdata-eu's YASGUI](https://github.com/Matdata-eu/yasgui), as in the `mathiasvda/yasgui` image; `?query=` pre-fills it) |
-| `/id/<path>` | the resource `<baseIri><path>`: HTML page, or by content negotiation Turtle, N-Triples, JSON-LD, RDF/XML, N3, N-Quads, TriG (`?format=ttl` or `.ttl` also work); with inference, `?infer=false` for the explicit statements only |
+| `/id/<path>` | the resource `<baseIri><path>`: HTML page, or by content negotiation Turtle, N-Triples, JSON-LD, RDF/XML, N3, N-Quads, TriG (`?format=ttl` or `.ttl` also work); with inference, `?infer=false` for the explicit statements only, `?infer=true` with the inferred ones |
 | `/browse?iri=<IRI>` | any other IRI in the graph (e.g. ontology terms) |
 | `/status.json` | synchronisation state |
 
@@ -80,6 +80,7 @@ Everything about the knowledge graph is in `config.json`, next to `compose.yaml`
 | `describeLimit` | `5000` | maximum statements in a resource description |
 | `inverseLimit` | `50` | maximum incoming links shown on a resource page |
 | `inference` | `"none"` | inference regime of the SPARQL endpoint, among those of the store (see [Inference](#inference)) |
+| `describeInferred` | `true` | with inference, resource pages and RDF serialisations show the inferred statements by default; `false`: the explicit ones only by default |
 | `zenodoApi` | `"https://zenodo.org/api"` | e.g. the Zenodo sandbox |
 | `zenodoToken` | none | access token, only for restricted records |
 
@@ -203,7 +204,8 @@ The resource pages and RDF serialisations show the explicit statements, in their
 and the statements inferred about the resource, marked "inferred" (in N-Quads and TriG,
 they are in the default graph). The same `infer=false` shows the explicit statements only
 (e.g. `/id/x?infer=false`, `/id/x?format=ttl&infer=false`), and each page links to the
-other view. The inferred statements come from GraphDB's pseudo-graph
+other view. With `"describeInferred": false` in `config.json`, the explicit statements
+are the default, and `infer=true` adds the inferred ones. The inferred statements come from GraphDB's pseudo-graph
 `<http://www.ontotext.com/implicit>`, or from Fuseki's service `kg`, while the explicit
 ones come from the statements without inference (`infer=false` for GraphDB, the dataset
 `ds` for Fuseki). Inferred statements about blank nodes are not shown. The statistics on

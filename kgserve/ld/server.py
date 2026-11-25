@@ -63,7 +63,7 @@ class App:
     def __init__(self, config: Config):
         self.config = config
         # Resource descriptions: the explicit statements, with their graphs, and the inferred
-        # ones (unless ?infer=false).
+        # ones (by default if describeInferred, else with ?infer=true).
         self.store = Store(config.store.explicit_query, auth=config.store.auth, inference=inference_source(config))
         self.state = JSONFile(config.data_dir / "state.json", {})
         self.hash_index = JSONFile(config.data_dir / "hash-index.json", {})
@@ -152,8 +152,9 @@ class Handler(BaseHTTPRequestHandler):
         cfg = app.config
         path, _, query_string = self.path.partition("?")
         query = urllib.parse.parse_qs(query_string)
-        # As on the SPARQL endpoint: infer=false for the explicit statements only.
-        explicit = (query.get("infer") or [""])[0].lower() == "false"
+        # As on the SPARQL endpoint: infer=false for the explicit statements only, and
+        # infer=true for the inferred ones too (the default is describeInferred).
+        inferred = {"true": True, "false": False}.get((query.get("infer") or [""])[0].lower())
         # All paths are relative to the service root: a front proxy can mount it anywhere.
         if path == "/healthz":
             return self.send(200, "ok", "text/plain")
@@ -170,7 +171,7 @@ class Handler(BaseHTTPRequestHandler):
             if not re.match(r"^[a-zA-Z][a-zA-Z0-9+.-]*:[^\s<>\"{}|\\^`]*$", iri):
                 return self.send(400, error_page(self.page(), "Expected an absolute IRI in the 'iri' parameter."))
             fmt = (query.get("format") or [None])[0]
-            return self.resource(iri, fmt, lambda f: self.page().browse_url(iri, f), explicit=explicit)
+            return self.resource(iri, fmt, lambda f: self.page().browse_url(iri, f), inferred=inferred)
         prefix = f"/{cfg.resource_path}/"
         if path.startswith(prefix):
             rest = path[len(prefix):]
@@ -189,23 +190,27 @@ class Handler(BaseHTTPRequestHandler):
                 # Relative link to a format of the resource: "./<last path segment>?format=..."
                 segment = iri[len(base_iri):].rsplit("/", 1)[-1]
                 done = self.resource(iri, candidate_fmt, lambda f, seg=segment: f"./{seg}?format={f}",
-                                     respond_not_found=last, explicit=explicit)
+                                     respond_not_found=last, inferred=inferred)
                 if done:
                     return
             return
         self.send(404, not_found(self.page(), path, "No such page."))
 
     def resource(self, iri: str, fmt: str | None, format_url, respond_not_found: bool = True,
-                 explicit: bool = False) -> bool:
+                 inferred: bool | None = None) -> bool:
         """Describe ``iri``; returns False (without responding) if not found and not ``respond_not_found``.
-        ``explicit``: without the inferred statements."""
+        ``inferred``: with the inferred statements (``None``: as configured by describeInferred)."""
         app = self.app
-        with_inferred = not explicit and app.store.inference is not None
+        default = app.config.describe_inferred
+        with_inferred = app.store.inference is not None and (default if inferred is None else inferred)
         if app.store.inference is not None:
-            # Links to the formats keep the choice; the HTML page links to the other one.
+            # Links to the formats keep the choice; the HTML page links to the other one. The
+            # parameter is only in the URL of the view that is not the default.
+            def view(on: bool) -> str:
+                return "" if on == default else f"&infer={'true' if on else 'false'}"
             plain_format_url = format_url
-            format_url = (lambda f: plain_format_url(f) + "&infer=false") if explicit else plain_format_url
-            other_view = plain_format_url("html") + ("" if explicit else "&infer=false")
+            format_url = lambda f: plain_format_url(f) + view(with_inferred)  # noqa: E731
+            other_view = plain_format_url("html") + view(not with_inferred)
         else:
             other_view = None
         if fmt is None:

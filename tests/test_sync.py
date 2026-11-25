@@ -278,11 +278,13 @@ def test_config_file(tmp_path, monkeypatch):
     monkeypatch.setenv("KG_STORE_TYPE", "fuseki")
     monkeypatch.setenv("DATA_DIR", str(tmp_path / "data"))
     path = tmp_path / "config.json"
-    path.write_text('{"zenodo": "10.5281/zenodo.24305088", "files": ["*.nq.gz"], "resourcePath": "/res/"}')
+    path.write_text('{"zenodo": "10.5281/zenodo.24305088", "files": ["*.nq.gz"], "resourcePath": "/res/", '
+                    '"inference": "rdfs", "describeInferred": false}')
     config = Config.load(path)
     assert config.zenodo == "10.5281/zenodo.24305088"
     assert config.files == ["*.nq.gz"]
     assert config.resource_path == "res"
+    assert config.inference == "rdfs" and config.describe_inferred is False
     assert config.sync_interval == 3600 and config.base_iri == ""  # defaults
     assert config.store.type == "fuseki"
     assert config.store.query == "http://store:3030/ds/sparql"
@@ -294,6 +296,7 @@ def test_config_file(tmp_path, monkeypatch):
     ('{"zenodo": "1", "syncIntervall": 5}', "Unknown option"),
     ('{"zenodo": "1", "syncInterval": "1h"}', "must be a int"),
     ('{"zenodo": "1", "followLatest": 1}', "must be a bool"),
+    ('{"zenodo": "1", "describeInferred": "no"}', "must be a bool"),
     ('{"zenodo": "1", "files": "*.nq"}', "must be a list"),
     ('{"zenodo": "1", "inference": "rdfs"}', "not offered by oxigraph.*offered by graphdb and fuseki"),
     ('{"zenodo": "1",}', "not valid JSON"),

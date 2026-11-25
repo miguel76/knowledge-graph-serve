@@ -36,6 +36,7 @@ OPTIONS: dict[str, tuple[str, type, object]] = {
     "describeLimit": ("describe_limit", int, 5000),
     "inverseLimit": ("inverse_limit", int, 50),
     "inference": ("inference", str, "none"),
+    "describeInferred": ("describe_inferred", bool, True),
 }
 
 # Store type -> default endpoints (query, update, data) of the store container.
@@ -124,6 +125,7 @@ class Config:
     describe_limit: int = 5000
     inverse_limit: int = 50
     inference: str = "none"
+    describe_inferred: bool = True
     store: StoreConfig = field(default_factory=StoreConfig)
     data_dir: Path = Path("/data")
 
