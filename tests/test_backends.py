@@ -1,6 +1,8 @@
 import gzip
+import io
 import json
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -199,3 +201,107 @@ def test_fuseki_inference_check_and_refresh(tmp_path, fake_store):
     assert store.check_inference() is True
     store.load(rdffiles.load_items("a.ttl", tmp_path / "a.ttl", lambda key: "urn:g"))
     assert not [r for r in requests if r[1].startswith(("/kg/update", "/kg/sparql"))]
+
+
+class SlowStream(io.RawIOBase):
+    """``chunks`` pieces of N-Quads, one every ``delay`` seconds."""
+
+    def __init__(self, chunks: int, delay: float):
+        self.chunks, self.delay, self.sent = chunks, delay, 0
+
+    def readable(self):
+        return True
+
+    def readinto(self, b):
+        if self.sent == self.chunks:
+            return 0
+        if self.sent:
+            time.sleep(self.delay)
+        data = b"<urn:s%d> <urn:p> <urn:o> <urn:g> .\n" % self.sent
+        self.sent += 1
+        b[:len(data)] = data
+        return len(data)
+
+
+@pytest.fixture()
+def rdf4j_transactions():
+    """An RDF4J transaction endpoint that forgets a transaction left untouched for TIMEOUT
+    seconds, as the RDF4J server does: requests touch it when they start and when they end."""
+    timeout = 0.3
+    state = {"touched": time.monotonic(), "expired": False, "pings": 0, "added": b""}
+    lock = threading.Lock()
+
+    def touch():
+        with lock:
+            now = time.monotonic()
+            if now - state["touched"] > timeout:
+                state["expired"] = True
+            state["touched"] = now
+            return not state["expired"]
+
+    class Handler(BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
+
+        def _reply(self, status, body=b""):
+            self.send_response(status)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def _body(self):
+            if self.headers.get("Transfer-Encoding") != "chunked":
+                return self.rfile.read(int(self.headers.get("Content-Length", 0)))
+            data = b""
+            while (size := int(self.rfile.readline().strip(), 16)):
+                data += self.rfile.read(size)
+                self.rfile.readline()
+            self.rfile.readline()
+            return data
+
+        def do_POST(self):
+            self._body()
+            self.send_response(201)
+            self.send_header("Location", f"http://127.0.0.1:{self.server.server_address[1]}/repositories/kg/transactions/1")
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            touch()
+
+        def do_PUT(self):
+            action = self.path.split("action=")[1].split("&")[0]
+            if not touch():
+                self._body()
+                return self._reply(500, b"transaction with id 1 not registered.")
+            body = self._body()
+            if action == "PING":
+                state["pings"] += 1
+                body = str(int(timeout * 1000)).encode()
+            elif action == "ADD":
+                state["added"] += body
+                body = b""
+            else:
+                body = b""
+            ok = touch()
+            self._reply(200 if ok else 500, body if ok else b"transaction with id 1 not registered.")
+
+        def do_DELETE(self):
+            self._reply(204)
+
+        def log_message(self, *args):
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    yield f"http://127.0.0.1:{server.server_address[1]}", state
+    server.shutdown()
+
+
+def test_rdf4j_transaction_kept_alive_during_a_long_upload(rdf4j_transactions):
+    url, state = rdf4j_transactions
+    store = Store(StoreConfig(type="graphdb", query=f"{url}/repositories/kg", data=url))
+    store._ensure_graphdb_repository = lambda: None
+    item = rdffiles.LoadItem(key="slow.nq", path=Path("slow.nq"), format=rdffiles.detect("slow.nq"))
+    # A 1.2 s upload, 4 times the timeout of the transaction.
+    store._load_rdf4j([item], lambda item: io.BufferedReader(SlowStream(13, 0.1)))
+    assert not state["expired"]
+    assert state["pings"] >= 4
+    assert state["added"].count(b"\n") == 13
