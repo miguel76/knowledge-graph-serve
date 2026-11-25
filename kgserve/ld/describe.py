@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 
 import rdflib
 from rdflib import BNode, Literal, URIRef
+from rdflib.graph import DATASET_DEFAULT_GRAPH_ID
 
 from .. import http
 
@@ -103,6 +104,23 @@ def describe_query(iris: list[str], limit: int, depth: int = 3) -> str:
     return f"SELECT DISTINCT ?g ?s ?p ?o WHERE {{\n  VALUES ?r {{ {values} }}\n  {_blank_closure(depth)}\n}} LIMIT {limit}"
 
 
+# Inferred statements go to the default graph of a description (as in GraphDB): the
+# explicit ones are in the named graphs they come from.
+INFERRED_GRAPH = str(DATASET_DEFAULT_GRAPH_ID)
+# Subjects whose inferred statements are shown (a resource and the first of its hash IRIs).
+MAX_INFERRED_SUBJECTS = 50
+
+
+def inferred_query(iris: list[str], limit: int, dataset_clause: str = "") -> str:
+    """The statements about ``iris`` in the default graph of an endpoint with inference. One
+    branch per subject, each with its subject bound: a reasoner (Jena) must not be asked an
+    open pattern. Statements on blank nodes are left out (their labels differ between
+    endpoints, and inferences about them, such as OWL restrictions as types, are noise)."""
+    branches = "\n  UNION ".join(f"{{ <{iri}> ?p ?o BIND(<{iri}> AS ?s) }}" for iri in iris)
+    return (f"SELECT DISTINCT ?s ?p ?o {dataset_clause}WHERE {{\n  {branches}\n  FILTER(!isBlank(?o))\n}} "
+            f"LIMIT {limit}")
+
+
 def inverse_query(iri: str, limit: int) -> str:
     return (f"SELECT DISTINCT ?s ?p WHERE {{ GRAPH ?g {{ ?s ?p <{iri}> }} FILTER(isIRI(?s)) }} "
             f"LIMIT {limit + 1}")
@@ -127,6 +145,8 @@ class Description:
     inverse: list[tuple[str, str]] = field(default_factory=list)
     inverse_truncated: bool = False
     labels: dict[str, list[Literal]] = field(default_factory=dict)
+    inference: str = "none"  # regime of the store, when its inferred statements can be shown
+    with_inferred: bool = False  # inferred statements were asked for
 
     def __len__(self) -> int:
         return len(self.dataset)
@@ -144,17 +164,32 @@ class Description:
         return graph.serialize(format=rdflib_format, encoding="utf-8")
 
 
+@dataclass
+class InferenceSource:
+    """Where the inferred statements are: an endpoint answering with inference, and the
+    dataset clause selecting them (GraphDB: its pseudo-graph of the implicit statements)."""
+
+    regime: str
+    endpoint: str
+    dataset_clause: str = ""
+
+
 class Store:
-    def __init__(self, endpoint: str, auth: tuple[str, str] | None = None, timeout: float = 60):
-        self.endpoint = endpoint
+    def __init__(self, endpoint: str, auth: tuple[str, str] | None = None, timeout: float = 60,
+                 inference: InferenceSource | None = None):
+        self.endpoint = endpoint  # explicit statements
         self.auth = auth
         self.timeout = timeout
+        self.inference = inference
 
-    def select(self, query: str) -> list[dict]:
-        resp = http.sparql(self.endpoint, query, auth=self.auth, timeout=self.timeout)
+    def select(self, query: str, endpoint: str | None = None) -> list[dict]:
+        resp = http.sparql(endpoint or self.endpoint, query, auth=self.auth, timeout=self.timeout)
         return json.loads(resp.body)["results"]["bindings"]
 
-    def describe(self, iris: list[str], limit: int, prefixes: dict[str, str] | None = None) -> Description:
+    def describe(self, iris: list[str], limit: int, prefixes: dict[str, str] | None = None,
+                 inferred: bool = True) -> Description:
+        """The explicit statements about ``iris`` (and the blank nodes they lead to), in their
+        graphs, and, if ``inferred`` and the store infers, the inferred ones."""
         dataset = rdflib.Dataset()
         for prefix, namespace in (prefixes or {}).items():
             dataset.bind(prefix, namespace, override=True)
@@ -162,7 +197,26 @@ class Store:
         for row in rows:
             graph = dataset.graph(URIRef(row["g"]["value"])) if "g" in row else dataset.default_graph
             graph.add((_term(row["s"]), _term(row["p"]), _term(row["o"])))
-        return Description(iris, dataset, truncated=len(rows) >= limit)
+        desc = Description(iris, dataset, truncated=len(rows) >= limit)
+        if self.inference:
+            desc.inference = self.inference.regime
+            desc.with_inferred = inferred
+            if inferred and len(dataset):
+                self._add_inferred(desc, limit)
+        return desc
+
+    def _add_inferred(self, desc: Description, limit: int) -> None:
+        source = self.inference
+        subjects = desc.iris[:MAX_INFERRED_SUBJECTS]
+        rows = self.select(inferred_query(subjects, limit, source.dataset_clause), source.endpoint)
+        # GraphDB may have a statement both explicit and implicit; Fuseki's inference
+        # endpoint answers with both: keep the explicit one.
+        explicit = {(s, p, o) for s, p, o, _ in desc.dataset.quads((None, None, None, None))}
+        for row in rows:
+            triple = (_term(row["s"]), _term(row["p"]), _term(row["o"]))
+            if triple not in explicit:
+                desc.dataset.default_graph.add(triple)
+        desc.truncated = desc.truncated or len(rows) >= limit
 
     def add_inverse(self, desc: Description, limit: int) -> None:
         rows = self.select(inverse_query(desc.iris[0], limit))

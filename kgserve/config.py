@@ -3,6 +3,9 @@
 Everything about the knowledge graph comes from one JSON file (``config.json``), where only
 ``zenodo`` is required. How to reach the triple store is container wiring, set by the
 compose files through ``KG_STORE_*`` environment variables.
+
+The inference regime (``inference``) is chosen in ``config.json``, among those that the
+store offers (``INFERENCE``).
 """
 
 from __future__ import annotations
@@ -11,6 +14,8 @@ import json
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
+
+from .http import with_params
 
 DEFAULT_CONFIG_PATH = "/config/config.json"
 
@@ -30,6 +35,8 @@ OPTIONS: dict[str, tuple[str, type, object]] = {
     "title": ("title", str, ""),
     "describeLimit": ("describe_limit", int, 5000),
     "inverseLimit": ("inverse_limit", int, 50),
+    "inference": ("inference", str, "none"),
+    "describeInferred": ("describe_inferred", bool, True),
 }
 
 # Store type -> default endpoints (query, update, data) of the store container.
@@ -37,6 +44,22 @@ STORE_DEFAULTS = {
     "oxigraph": ("http://store:7878/query", "http://store:7878/update", "http://store:7878/store?no_transaction"),
     "fuseki": ("http://store:3030/ds/sparql", "http://store:3030/ds/update", "http://store:3030/ds/data"),
     "graphdb": ("http://store:7200/repositories/{repository}", "", "http://store:7200"),
+}
+
+# Store type -> default base URL of the service answering with inference, when it is not the
+# query endpoint: Fuseki's "kg" service, set up by fuseki/entrypoint.sh.
+INFERENCE_SERVICE_DEFAULTS = {"fuseki": "http://store:3030/kg"}
+
+GRAPHDB_RULESETS = [f"{name}{variant}" for name in ("rdfs", "rdfsplus", "owl-horst", "owl-max", "owl2-ql", "owl2-rl")
+                    for variant in ("", "-optimized")]
+
+# Store type -> inference regimes it offers ("none": explicit statements only).
+#  * GraphDB: the predefined rulesets, set on the repository (materialised when loading).
+#  * Fuseki: the Jena reasoners (fuseki/entrypoint.sh maps each name to its reasoner).
+INFERENCE: dict[str, list[str]] = {
+    "oxigraph": ["none"],
+    "graphdb": ["none", *GRAPHDB_RULESETS],
+    "fuseki": ["none", "rdfs", "transitive", "owl-micro", "owl-mini", "owl"],
 }
 
 
@@ -57,12 +80,20 @@ class StoreConfig:
     update: str = ""
     data: str = ""
     repository: str = "kg"
+    inference_service: str = ""
     user: str = ""
     password: str = ""
 
     @property
     def auth(self) -> tuple[str, str] | None:
         return (self.user, self.password) if self.user else None
+
+    @property
+    def explicit_query(self) -> str:
+        """The query endpoint, answering with the explicit statements only: what the sync
+        counts and the linked-data server describes. GraphDB answers with the inferred
+        statements too unless ``infer=false``."""
+        return with_params(self.query, infer="false") if self.type == "graphdb" else self.query
 
     @classmethod
     def from_env(cls) -> "StoreConfig":
@@ -73,6 +104,7 @@ class StoreConfig:
         query, update, data = (v.format(repository=repository) for v in STORE_DEFAULTS[kind])
         return cls(type=kind, query=_env("KG_STORE_QUERY", query), update=_env("KG_STORE_UPDATE", update),
                    data=_env("KG_STORE_DATA", data), repository=repository,
+                   inference_service=_env("KG_STORE_INFERENCE", INFERENCE_SERVICE_DEFAULTS.get(kind, "")),
                    user=_env("KG_STORE_USER"), password=_env("KG_STORE_PASSWORD"))
 
 
@@ -92,6 +124,8 @@ class Config:
     title: str = ""
     describe_limit: int = 5000
     inverse_limit: int = 50
+    inference: str = "none"
+    describe_inferred: bool = True
     store: StoreConfig = field(default_factory=StoreConfig)
     data_dir: Path = Path("/data")
 
@@ -116,7 +150,16 @@ class Config:
         if not kwargs.get("zenodo"):
             raise ConfigError('config.json: "zenodo" (the record DOI, id or URL) is required')
         kwargs["resource_path"] = kwargs.get("resource_path", "id").strip("/") or "id"
-        return cls(**kwargs, store=store or StoreConfig(), data_dir=data_dir or Path("/data"))
+        store = store or StoreConfig()
+        inference = kwargs.setdefault("inference", "none").strip().lower() or "none"
+        offered = INFERENCE.get(store.type, ["none"])
+        if inference not in offered:
+            others = [kind for kind, regimes in INFERENCE.items() if inference in regimes]
+            hint = f"; it is offered by {' and '.join(others)}" if others else ""
+            raise ConfigError(f"config.json: inference {inference!r} is not offered by {store.type} "
+                              f"(KG_STORE_TYPE), which offers: {', '.join(offered)}{hint}")
+        kwargs["inference"] = inference
+        return cls(**kwargs, store=store, data_dir=data_dir or Path("/data"))
 
     @classmethod
     def load(cls, path: str | Path | None = None) -> "Config":

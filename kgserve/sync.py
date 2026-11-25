@@ -101,7 +101,7 @@ class Syncer:
         self.zenodo = Zenodo(config.zenodo_api, config.zenodo_token)
         config.data_dir.mkdir(parents=True, exist_ok=True)
         self.state = State(config.data_dir / "state.json")
-        self.store = Store(config.store)
+        self.store = Store(config.store, config.inference)
         self.wake = threading.Event()  # set by signals
         self.reload = False  # SIGUSR1: reload even if up to date
         self.stop = False
@@ -114,8 +114,12 @@ class Syncer:
         self.state.update(last_check=now())
         keys = rdffiles.select([f.key for f in record.files], cfg.files, cfg.exclude_files)
         loaded = self.state.data
+        self.store.wait_until_up()
+        # Fuseki started with another inference regime: an error. GraphDB: reload (with the ruleset).
+        serves_inference = self.store.check_inference()
         up_to_date = (loaded.get("record", {}).get("id") == record.id and loaded.get("loaded_files") == keys
-                      and loaded.get("status") == "ok" and loaded.get("store_type") == cfg.store.type)
+                      and loaded.get("status") == "ok" and loaded.get("store_type") == cfg.store.type
+                      and loaded.get("inference", "none") == cfg.inference and serves_inference)
         # The store keeps its own volume: reload if it was emptied (e.g. recreated).
         if up_to_date and not force and not self.store.is_empty():
             log.info("Up to date with %s (version %s)", record.doi, record.version or "-")
@@ -144,7 +148,7 @@ class Syncer:
         log.info("Loaded %s statements from record %s", store["triples"], record.id)
 
         self.state.update(
-            status="ok", store_type=cfg.store.type, record=record.to_dict(), loaded_files=keys,
+            status="ok", store_type=cfg.store.type, inference=cfg.inference, record=record.to_dict(), loaded_files=keys,
             store=store, last_sync=now(), last_error=None, loading_record=None,
             **describe_store(self.store),
         )

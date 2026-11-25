@@ -13,7 +13,7 @@ from pathlib import Path
 
 from .. import __version__
 from ..config import Config
-from .describe import FORMATS, Store, negotiate
+from .describe import FORMATS, InferenceSource, Store, negotiate
 from .render import (WELL_KNOWN_PREFIXES, Page, ResourceRenderer, error_page, esc, landing, not_found,
                      root_prefix, sparql_editor)
 
@@ -47,10 +47,24 @@ class JSONFile:
         return self.value
 
 
+def inference_source(config: Config) -> InferenceSource | None:
+    """Where the linked-data server reads the inferred statements, if the store infers."""
+    store = config.store
+    if config.inference == "none":
+        return None
+    if store.type == "graphdb":
+        return InferenceSource(config.inference, store.query, "FROM <http://www.ontotext.com/implicit> ")
+    if store.type == "fuseki" and store.inference_service:
+        return InferenceSource(config.inference, f"{store.inference_service.rstrip('/')}/sparql")
+    return None
+
+
 class App:
     def __init__(self, config: Config):
         self.config = config
-        self.store = Store(config.store.query, auth=config.store.auth)
+        # Resource descriptions: the explicit statements, with their graphs, and the inferred
+        # ones (by default if describeInferred, else with ?infer=true).
+        self.store = Store(config.store.explicit_query, auth=config.store.auth, inference=inference_source(config))
         self.state = JSONFile(config.data_dir / "state.json", {})
         self.hash_index = JSONFile(config.data_dir / "hash-index.json", {})
 
@@ -138,6 +152,9 @@ class Handler(BaseHTTPRequestHandler):
         cfg = app.config
         path, _, query_string = self.path.partition("?")
         query = urllib.parse.parse_qs(query_string)
+        # As on the SPARQL endpoint: infer=false for the explicit statements only, and
+        # infer=true for the inferred ones too (the default is describeInferred).
+        inferred = {"true": True, "false": False}.get((query.get("infer") or [""])[0].lower())
         # All paths are relative to the service root: a front proxy can mount it anywhere.
         if path == "/healthz":
             return self.send(200, "ok", "text/plain")
@@ -154,7 +171,7 @@ class Handler(BaseHTTPRequestHandler):
             if not re.match(r"^[a-zA-Z][a-zA-Z0-9+.-]*:[^\s<>\"{}|\\^`]*$", iri):
                 return self.send(400, error_page(self.page(), "Expected an absolute IRI in the 'iri' parameter."))
             fmt = (query.get("format") or [None])[0]
-            return self.resource(iri, fmt, lambda f: self.page().browse_url(iri, f))
+            return self.resource(iri, fmt, lambda f: self.page().browse_url(iri, f), inferred=inferred)
         prefix = f"/{cfg.resource_path}/"
         if path.startswith(prefix):
             rest = path[len(prefix):]
@@ -173,15 +190,29 @@ class Handler(BaseHTTPRequestHandler):
                 # Relative link to a format of the resource: "./<last path segment>?format=..."
                 segment = iri[len(base_iri):].rsplit("/", 1)[-1]
                 done = self.resource(iri, candidate_fmt, lambda f, seg=segment: f"./{seg}?format={f}",
-                                     respond_not_found=last)
+                                     respond_not_found=last, inferred=inferred)
                 if done:
                     return
             return
         self.send(404, not_found(self.page(), path, "No such page."))
 
-    def resource(self, iri: str, fmt: str | None, format_url, respond_not_found: bool = True) -> bool:
-        """Describe ``iri``; returns False (without responding) if not found and not ``respond_not_found``."""
+    def resource(self, iri: str, fmt: str | None, format_url, respond_not_found: bool = True,
+                 inferred: bool | None = None) -> bool:
+        """Describe ``iri``; returns False (without responding) if not found and not ``respond_not_found``.
+        ``inferred``: with the inferred statements (``None``: as configured by describeInferred)."""
         app = self.app
+        default = app.config.describe_inferred
+        with_inferred = app.store.inference is not None and (default if inferred is None else inferred)
+        if app.store.inference is not None:
+            # Links to the formats keep the choice; the HTML page links to the other one. The
+            # parameter is only in the URL of the view that is not the default.
+            def view(on: bool) -> str:
+                return "" if on == default else f"&infer={'true' if on else 'false'}"
+            plain_format_url = format_url
+            format_url = lambda f: plain_format_url(f) + view(with_inferred)  # noqa: E731
+            other_view = plain_format_url("html") + view(not with_inferred)
+        else:
+            other_view = None
         if fmt is None:
             fmt = negotiate(self.headers.get("Accept"))
             if fmt is None:
@@ -191,7 +222,7 @@ class Handler(BaseHTTPRequestHandler):
             self.send(400, f"Unknown format {fmt!r}. Available: html, {', '.join(FORMATS)}", "text/plain")
             return True
 
-        etag = 'W/"' + hashlib.sha1(f"{app.store_tag()}|{__version__}|{iri}|{fmt}|{self.headers.get('Accept-Language', '')}".encode()).hexdigest()[:20] + '"'
+        etag = 'W/"' + hashlib.sha1(f"{app.store_tag()}|{__version__}|{iri}|{fmt}|{with_inferred}|{self.headers.get('Accept-Language', '')}".encode()).hexdigest()[:20] + '"'
         alternates = ", ".join(f'<{format_url(f)}>; rel="alternate"; type="{FORMATS[f][0]}"' for f in FORMATS)
         headers = {"Vary": "Accept, Accept-Language", "ETag": etag, "Cache-Control": "public, max-age=300", "Link": alternates}
         if app.store_tag() and self.headers.get("If-None-Match") == etag:
@@ -204,12 +235,13 @@ class Handler(BaseHTTPRequestHandler):
 
         iris = [iri] + [h for h in app.hash_index.get().get(iri, []) if h != iri][:MAX_HASH_SUBJECTS]
         prefixes = dict(WELL_KNOWN_PREFIXES)
-        desc = app.store.describe(iris, app.config.describe_limit, prefixes)
+        desc = app.store.describe(iris, app.config.describe_limit, prefixes, inferred=with_inferred)
         if len(desc) == 0:
             if "#" in iri:
                 # Browsers drop fragments, but a client may still ask for a hash IRI explicitly.
                 doc = iri.split("#", 1)[0]
-                desc = app.store.describe([doc] + app.hash_index.get().get(doc, [])[:MAX_HASH_SUBJECTS], app.config.describe_limit, prefixes)
+                desc = app.store.describe([doc] + app.hash_index.get().get(doc, [])[:MAX_HASH_SUBJECTS],
+                                          app.config.describe_limit, prefixes, inferred=with_inferred)
         if len(desc) == 0:
             if not respond_not_found:
                 return False
@@ -224,7 +256,7 @@ class Handler(BaseHTTPRequestHandler):
             app.store.add_labels(desc)
             renderer = ResourceRenderer(self.page(), desc, self.languages())
             renderer.page.title = f"{renderer.name(iri)} · {renderer.page.kg_title}"
-            self.send(200, renderer.render(format_url), headers=headers)
+            self.send(200, renderer.render(format_url, other_view), headers=headers)
         else:
             media_type = FORMATS[fmt][0]
             charset = "" if fmt in ("jsonld",) else "; charset=utf-8"
@@ -237,5 +269,5 @@ def serve(config: Config, host: str = "0.0.0.0", port: int = 8000) -> None:
     server = ThreadingHTTPServer((host, port), Handler)
     server.daemon_threads = True
     log.info("Linked data server on %s:%s (resources at /%s/, SPARQL %s)", host, port,
-             config.resource_path, config.store.query)
+             config.resource_path, config.store.explicit_query)
     server.serve_forever()

@@ -1,8 +1,9 @@
 # Use GraphDB as the store:
 #   docker compose -f compose.yaml -f compose.graphdb.yaml up -d
 # GraphDB 11 needs a license file, also for the free edition: put it in ./graphdb.license.
-# The sync creates the repository "kg" and replaces its content in one transaction per
-# release. The Workbench is published on 127.0.0.1:7200 only.
+# The sync creates the repository "kg", with the ruleset of config.json ("inference"), and
+# replaces its content in one transaction per release. The Workbench is published on
+# 127.0.0.1:7200 only.
 
 services:
   store:
@@ -27,3 +28,4 @@ services:
   web:
     environment:
       SPARQL_UPSTREAM: http://store:7200/repositories/kg
+      SPARQL_UPSTREAM_EXPLICIT: http://store:7200/repositories/kg

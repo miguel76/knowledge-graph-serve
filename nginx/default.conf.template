@@ -1,6 +1,8 @@
 # The whole service lives at the root of this server; every URL it generates is relative,
 # so a front proxy can mount it under any path (see README: "Publishing").
-# ${SPARQL_UPSTREAM} (the store's read-only query endpoint) is set by the compose files.
+# ${SPARQL_UPSTREAM} (the store's read-only query endpoint) is set by the compose files, and
+# ${SPARQL_UPSTREAM_EXPLICIT}, the one answering without inference (?infer=false): with
+# Fuseki another service; with GraphDB the same, which reads infer=false itself.
 
 server {
     listen 80;
@@ -25,10 +27,21 @@ server {
         if ($http_accept ~* "text/html") {
             return 303 sparql-ui/$is_args$args;
         }
+        if ($arg_infer = "false") {
+            rewrite ^ /sparql-explicit last;
+        }
         proxy_hide_header Access-Control-Allow-Origin;
         add_header Access-Control-Allow-Origin * always;
         proxy_read_timeout 300s;
         proxy_pass ${SPARQL_UPSTREAM};
+    }
+
+    location = /sparql-explicit {
+        internal;
+        proxy_hide_header Access-Control-Allow-Origin;
+        add_header Access-Control-Allow-Origin * always;
+        proxy_read_timeout 300s;
+        proxy_pass ${SPARQL_UPSTREAM_EXPLICIT};
     }
 
     # Everything else: landing page, SPARQL editor, linked data (/id/...), /browse.

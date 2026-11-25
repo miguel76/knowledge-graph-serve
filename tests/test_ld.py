@@ -1,17 +1,19 @@
 import json
 import threading
 import urllib.error
+import urllib.parse
 import urllib.request
 from http.server import ThreadingHTTPServer
 
 import pytest
 import rdflib
-from rdflib import Literal, URIRef
+from rdflib import RDF, Literal, URIRef
 from rdflib.plugins.sparql import prepareQuery
 
 from kgserve.config import Config, StoreConfig
 from kgserve.ld import server
-from kgserve.ld.describe import Description, describe_query, inverse_query, labels_query, negotiate
+from kgserve.ld.describe import (Description, describe_query, inferred_query, inverse_query, labels_query,
+                                 negotiate)
 from kgserve.ld.render import html_to_paragraphs
 
 BASE = "https://w3id.org/test/data/"
@@ -37,7 +39,8 @@ def test_negotiate(accept, expected):
 
 def test_queries_are_valid_sparql():
     for query in (describe_query([BASE + "a", BASE + "a#b"], 100), inverse_query(BASE + "a", 10),
-                  labels_query([BASE + "a", EX + "p"])):
+                  labels_query([BASE + "a", EX + "p"]), inferred_query([BASE + "a", BASE + "a#b"], 10),
+                  inferred_query([BASE + "a"], 10, "FROM <http://www.ontotext.com/implicit> ")):
         prepareQuery(query)
 
 
@@ -69,15 +72,22 @@ class FakeStore:
 
     def __init__(self):
         self.calls = []
+        self.inference = None  # set to a regime: inferred statements are added
 
-    def describe(self, iris, limit, prefixes=None):
+    def describe(self, iris, limit, prefixes=None, inferred=True):
         self.calls.append(list(iris))
         dataset = rdflib.Dataset()
         g = dataset.graph(URIRef("urn:g"))
         for iri in iris:
             if iri in (BASE + "a", BASE + "a.ttl", BASE + "doc#x", "http://other.org/z", BASE + "%C2%B0C"):
                 g.add((URIRef(iri), URIRef(EX + "p"), Literal("value of " + iri)))
-        return Description(list(iris), dataset)
+                g.add((URIRef(iri), RDF.type, URIRef(EX + "Cat")))
+        desc = Description(list(iris), dataset)
+        if self.inference:
+            desc.inference, desc.with_inferred = self.inference, inferred
+            if inferred and len(dataset):
+                dataset.default_graph.add((URIRef(iris[0]), RDF.type, URIRef(EX + "Animal")))
+        return desc
 
     def add_inverse(self, desc, limit):
         desc.inverse = [(BASE + "b", EX + "q")]
@@ -187,6 +197,78 @@ def test_pages(ld):
     assert "<main>" not in body  # no site-wide CSS around the editor
     status, _, body = get(base + "/status.json")
     assert json.loads(body)["status"] == "ok"
+
+
+def test_inferred_statements(ld):
+    base, store = ld
+    status, _, body = get(base + "/id/a", "text/html")
+    assert "Animal" not in body and "infer=false" not in body  # no inference: no switch
+    store.inference = "rdfs"
+    status, _, body = get(base + "/id/a", "text/html")
+    assert status == 200 and 'class="chip inf"' in body and ">inferred</span>" in body
+    assert "Explicit statements only</a>" in body and 'href="./a?format=html&amp;infer=false"' in body
+    assert 'href="./a?format=ttl"' in body
+    _, _, turtle = get(base + "/id/a")
+    assert "Animal" in turtle
+    _, _, nquads = get(base + "/id/a?format=nq")
+    assert [line for line in nquads.splitlines() if "Animal" in line][0].rstrip(" .").endswith("Animal>")  # default graph
+
+    # Explicit statements only: no inferred ones; links keep the choice.
+    status, headers, body = get(base + "/id/a?infer=false", "text/html")
+    assert status == 200 and "Animal" not in body and "With inferred statements" in body
+    assert 'href="./a?format=ttl&amp;infer=false"' in body and 'href="./a?format=html"' in body
+    assert "Animal" not in get(base + "/id/a?format=ttl&infer=false")[2]
+    assert "Animal" not in get(base + "/browse?iri=" + urllib.parse.quote(BASE + "a") + "&infer=false")[2]
+    assert headers["ETag"] != get(base + "/id/a", "text/html")[1]["ETag"]
+
+
+def test_explicit_statements_by_default(ld):
+    base, store = ld
+    store.inference = "rdfs"
+    server.Handler.app.config.describe_inferred = False
+    status, _, body = get(base + "/id/a", "text/html")
+    assert status == 200 and "Animal" not in body and "Explicit statements only." in body
+    assert 'href="./a?format=html&amp;infer=true">With inferred statements' in body
+    assert 'href="./a?format=ttl"' in body
+    assert "Animal" not in get(base + "/id/a")[2] and "Animal" not in get(base + "/id/a?infer=false")[2]
+
+    status, _, body = get(base + "/id/a?infer=true", "text/html")
+    assert "Animal" in body and 'href="./a?format=html">Explicit statements only' in body
+    assert 'href="./a?format=ttl&amp;infer=true"' in body
+    assert "Animal" in get(base + "/id/a?format=ttl&infer=true")[2]
+
+
+def test_store_adds_inferred_statements(monkeypatch):
+    from kgserve.ld.describe import InferenceSource, Store
+    store = Store("http://explicit", inference=InferenceSource("owl2-rl", "http://inferring", "FROM <urn:implicit> "))
+    queries = []
+
+    def select(query, endpoint=None):
+        queries.append((endpoint, query))
+        uri = lambda v: {"type": "uri", "value": v}
+        if endpoint is None:  # explicit
+            return [{"g": uri("urn:g"), "s": uri(BASE + "a"), "p": uri(str(RDF.type)), "o": uri(EX + "Cat")}]
+        return [{"s": uri(BASE + "a"), "p": uri(str(RDF.type)), "o": uri(EX + o)} for o in ("Cat", "Animal")]
+
+    monkeypatch.setattr(store, "select", select)
+    desc = store.describe([BASE + "a"], 100)
+    assert queries[1][0] == "http://inferring" and "FROM <urn:implicit> WHERE" in queries[1][1]
+    assert f"<{BASE}a> ?p ?o" in queries[1][1]  # subject bound in the query
+    inferred = {str(o) for _, _, o in desc.dataset.default_graph}
+    assert inferred == {EX + "Animal"}  # the explicit Cat is not repeated
+    assert desc.inference == "owl2-rl" and desc.with_inferred
+    queries.clear()
+    desc = store.describe([BASE + "a"], 100, inferred=False)
+    assert len(queries) == 1 and not desc.with_inferred and len(desc.dataset.default_graph) == 0
+
+
+def test_landing_shows_inference(ld, tmp_path):
+    base, _ = ld
+    assert "Inference" not in get(base + "/", "text/html")[2]
+    state = json.loads((tmp_path / "state.json").read_text())
+    (tmp_path / "state.json").write_text(json.dumps({**state, "inference": "owl2-rl"}))
+    body = get(base + "/", "text/html")[2]
+    assert "<code>owl2-rl</code>" in body and "infer=false" in body
 
 
 @pytest.mark.parametrize("path,expected", [
