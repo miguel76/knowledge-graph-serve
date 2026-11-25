@@ -6,7 +6,8 @@ Two standard protocols cover the supported stores:
   emptied with ``DROP ALL``, then each file is posted. Until the load ends (about 30 s for
   6 million quads on Oxigraph), queries see partial data.
 * RDF4J REST API (GraphDB, RDF4J): the data are replaced inside one transaction, so
-  queries see either the old or the new release.
+  queries see either the old or the new release. The transaction is pinged while it is open
+  (see ``TransactionKeepAlive``).
 
 Inference (``inference`` in config.json), where the store offers it:
 
@@ -21,6 +22,7 @@ from __future__ import annotations
 
 import json
 import logging
+import threading
 import time
 from typing import IO, Callable
 
@@ -191,23 +193,68 @@ class Store:
         repository = f"{self.config.data.rstrip('/')}/repositories/{self.config.repository}"
         txn = http.request("POST", f"{repository}/transactions", auth=self.auth).headers["location"]
         try:
-            http.request("PUT", with_params(txn, action="UPDATE"), b"CLEAR ALL",
-                         {"Content-Type": "application/sparql-update"}, auth=self.auth)
-            for item in items:
-                log.info("Loading %s", item.key)
-                params = {"action": "ADD"}
-                if item.graph and not item.format.dataset:
-                    params["context"] = f"<{item.graph}>"
-                with opener(item) as stream:
-                    http.request("PUT", with_params(txn, **params), stream,
-                                 {"Content-Type": item.format.media_type}, auth=self.auth)
-            http.request("PUT", with_params(txn, action="COMMIT"), auth=self.auth)
+            with TransactionKeepAlive(txn, self.auth):
+                http.request("PUT", with_params(txn, action="UPDATE"), b"CLEAR ALL",
+                             {"Content-Type": "application/sparql-update"}, auth=self.auth)
+                for item in items:
+                    log.info("Loading %s", item.key)
+                    params = {"action": "ADD"}
+                    if item.graph and not item.format.dataset:
+                        params["context"] = f"<{item.graph}>"
+                    with opener(item) as stream:
+                        http.request("PUT", with_params(txn, **params), stream,
+                                     {"Content-Type": item.format.media_type}, auth=self.auth)
+                http.request("PUT", with_params(txn, action="COMMIT"), auth=self.auth)
         except BaseException:
             try:
                 http.request("DELETE", txn, auth=self.auth)
             except Exception:  # noqa: BLE001 - best-effort rollback
                 log.exception("Could not roll back transaction %s", txn)
             raise
+
+
+class TransactionKeepAlive:
+    """Pings an RDF4J transaction while it is open, so that the server keeps it.
+
+    The RDF4J server, also inside GraphDB, forgets a transaction, and rolls it back, when no
+    request has touched it for ``rdf4j.server.txn.registry.timeout`` seconds (60 by default). A
+    request touches it when it starts and when it ends, not while it runs: the upload of a
+    whole release, which takes minutes on GraphDB with inference, outlives it, and the commit
+    then fails with "transaction with id ... not registered". The protocol's ``PING`` touches
+    it (as the RDF4J Java client does), and answers with the timeout in milliseconds: the
+    transaction is pinged at a third of it, from a thread, until the commit or rollback.
+    """
+
+    def __init__(self, txn: str, auth: tuple[str, str] | None = None):
+        self.txn = txn
+        self.auth = auth
+        self.interval = 20.0
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._run, name="rdf4j-txn-ping", daemon=True)
+
+    def _ping(self) -> bytes:
+        return http.request("PUT", with_params(self.txn, action="PING"), auth=self.auth, timeout=60).body
+
+    def __enter__(self) -> TransactionKeepAlive:
+        try:
+            timeout_ms = int(self._ping().strip())
+            self.interval = min(max(timeout_ms / 3000, 0.1), 20.0)
+        except (http.HTTPError, OSError, ValueError) as err:
+            log.warning("Ping of transaction %s failed (%s): pinging every %.0f s", self.txn, err, self.interval)
+        self._thread.start()
+        return self
+
+    def _run(self) -> None:
+        while not self._stop.wait(self.interval):
+            try:
+                self._ping()
+            except Exception as err:  # noqa: BLE001 - the next ping may succeed
+                if not self._stop.is_set():
+                    log.warning("Ping of transaction %s failed: %s", self.txn, err)
+
+    def __exit__(self, *exc_info) -> None:
+        self._stop.set()
+        self._thread.join(timeout=1)
 
 
 GRAPHDB_REPOSITORY_TEMPLATE = """\
