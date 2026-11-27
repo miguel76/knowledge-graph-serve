@@ -1,12 +1,14 @@
 # Serves one knowledge graph from Zenodo. Configure it in config.json (only "zenodo" is
-# required), then: docker compose up -d
+# required), then: docker compose pull && docker compose up -d
+# (or docker compose up -d --build to build the kgserve image from this checkout).
 # The service is at http://127.0.0.1:8080/ (KG_LISTEN); mount it in a front web server to
 # publish it (see README). Other triple stores: add -f compose.fuseki.yaml or
 # -f compose.graphdb.yaml.
 
 x-kgserve: &kgserve
   build: .
-  image: kgserve:latest
+  # Published by .github/workflows/docker.yml; KG_VERSION pins a release (e.g. 0.1.0).
+  image: ghcr.io/miguel76/knowledge-graph-serve:${KG_VERSION:-latest}
   restart: unless-stopped
   environment:
     KG_STORE_TYPE: oxigraph

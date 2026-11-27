@@ -10,7 +10,11 @@ echo '{"zenodo": "10.5281/zenodo.24305088"}' > config.json
 ```
 
 ```bash
-docker compose up -d --build
+docker compose pull
+```
+
+```bash
+docker compose up -d
 ```
 
 <http://127.0.0.1:8080/> now serves the Climate Change Knowledge Graph:
@@ -105,6 +109,28 @@ compose files:
 
 Data are kept in `./data` (`data/store` for the store, `data/sync` for the sync state).
 
+## Image
+
+The sync and linked-data services run the image
+[`ghcr.io/miguel76/knowledge-graph-serve`](https://github.com/miguel76/knowledge-graph-serve/pkgs/container/knowledge-graph-serve)
+(`linux/amd64` and `linux/arm64`), built by
+[`.github/workflows/docker.yml`](.github/workflows/docker.yml): `latest` follows `main`,
+and each release tag `vX.Y.Z` is published as `X.Y.Z` and `X.Y`. The other containers use
+their vendor images. To run a release rather than `latest`, set `KG_VERSION`:
+
+```bash
+KG_VERSION=0.1.0 docker compose up -d
+```
+
+To build the image from the checkout instead (e.g. after changing the code):
+
+```bash
+docker compose up -d --build
+```
+
+Besides the image, a deployment needs the compose files, `nginx/` and, for Fuseki,
+`fuseki/`, so it runs from a copy of this repository (or of a release archive).
+
 ## Publishing
 
 The service answers at the root of `KG_LISTEN`. To publish it, add a location to the
@@ -147,8 +173,8 @@ example, a w3id.org rule sending `https://w3id.org/climate-change-kg/data/(.*)` 
 The store is replaced by adding a compose file:
 
 * **Apache Jena Fuseki** (with a Lucene index on labels):
-  `docker compose -f compose.yaml -f compose.fuseki.yaml up -d --build`
-* **GraphDB**: `docker compose -f compose.yaml -f compose.graphdb.yaml up -d --build`. GraphDB 11
+  `docker compose -f compose.yaml -f compose.fuseki.yaml up -d`
+* **GraphDB**: `docker compose -f compose.yaml -f compose.graphdb.yaml up -d`. GraphDB 11
   needs a license file, also for the free edition: put it in `./graphdb.license`. The sync
   creates the repository `kg` and replaces its content in one transaction per release, so
   queries never see partial data.
@@ -250,6 +276,11 @@ python -m pytest
 python bench/bench.py http://127.0.0.1:8080/sparql
 ```
 
+Releases: set `__version__` in `kgserve/__init__.py`, then push a tag `v` + that version
+(e.g. `git tag v0.2.0 && git push origin v0.2.0`); the workflow publishes the image. It
+also publishes to Docker Hub when the repository variable `DOCKERHUB_REPOSITORY` (e.g.
+`someone/kgserve`) and the secrets `DOCKERHUB_USERNAME` and `DOCKERHUB_TOKEN` are set.
+
 Code layout:
 
 * `kgserve/config.py`: `config.json`.
@@ -260,6 +291,7 @@ Code layout:
 * `kgserve/sync.py`: the sync service.
 * `kgserve/ld/`: the linked-data server.
 * `fuseki/entrypoint.sh`: Fuseki's inference service, from `config.json`.
+* `.github/workflows/docker.yml`: tests, builds and publishes the image.
 
 The choice of components is discussed in [docs/alternatives.md](docs/alternatives.md).
 
