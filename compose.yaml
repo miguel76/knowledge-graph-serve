@@ -1,14 +1,19 @@
-# Serves one knowledge graph from Zenodo. Configure it in config.json (only "zenodo" is
-# required), then: docker compose pull && docker compose up -d
-# (or docker compose up -d --build to build the kgserve image from this checkout).
+# Serves one knowledge graph from Zenodo. Put this file in an empty directory with a
+# config.json (only "zenodo" is required, e.g. {"zenodo": "10.5281/zenodo.24305088"}), then:
+#   docker compose up -d
 # The service is at http://127.0.0.1:8080/ (KG_LISTEN); mount it in a front web server to
-# publish it (see README). Other triple stores: add -f compose.fuseki.yaml or
-# -f compose.graphdb.yaml.
+# publish it (see README). Data are kept in ./data. Other triple stores: add
+# -f compose.fuseki.yaml or -f compose.graphdb.yaml.
+#
+# The images are published from https://github.com/miguel76/knowledge-graph-serve:
+# KG_VERSION selects a release, KG_REGISTRY another registry. In a checkout of the
+# repository, docker compose up -d --build builds them from the source instead.
 
 x-kgserve: &kgserve
-  build: .
-  # Published by .github/workflows/docker.yml; KG_VERSION pins a release (e.g. 0.1.0).
-  image: ghcr.io/miguel76/knowledge-graph-serve:${KG_VERSION:-latest}
+  image: ${KG_REGISTRY:-ghcr.io/miguel76}/knowledge-graph-serve:${KG_VERSION:-latest}
+  build:
+    context: .
+    target: kgserve
   restart: unless-stopped
   environment:
     KG_STORE_TYPE: oxigraph
@@ -43,8 +48,12 @@ services:
     depends_on:
       - store
 
+  # nginx (nginx/default.conf.template): /sparql to the store, the rest to linked-data.
   web:
-    image: nginx:1.30-alpine
+    image: ${KG_REGISTRY:-ghcr.io/miguel76}/knowledge-graph-serve-web:${KG_VERSION:-latest}
+    build:
+      context: .
+      target: web
     restart: unless-stopped
     ports:
       - "${KG_LISTEN:-127.0.0.1:8080}:80"
@@ -52,8 +61,6 @@ services:
       # The SPARQL endpoint, and the one for explicit statements only (?infer=false).
       SPARQL_UPSTREAM: http://store:7878/query
       SPARQL_UPSTREAM_EXPLICIT: http://store:7878/query
-    volumes:
-      - ./nginx:/etc/nginx/templates:ro
     depends_on:
       - store
       - linked-data

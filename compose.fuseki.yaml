@@ -3,13 +3,15 @@
 # Only its query endpoints are reachable from outside (through nginx): the service "kg",
 # with the inference regime of config.json ("inference"), and, with infer=false, "ds".
 # fuseki/entrypoint.sh reads the regime when the store starts: restart it after a change.
+# The store image is secoresearch/fuseki with that entrypoint (Dockerfile, target fuseki).
 
 services:
   store:
-    image: secoresearch/fuseki:6.2.0
-    entrypoint: ["/bin/bash", "/kgserve/entrypoint.sh"]
-    # The image's command (an entrypoint set here clears it).
-    command: ["java", "-cp", "*:/javalibs/*", "org.apache.jena.fuseki.main.cmds.FusekiServerCmd"]
+    image: ${KG_REGISTRY:-ghcr.io/miguel76}/knowledge-graph-serve-fuseki:${KG_VERSION:-latest}
+    build:
+      context: .
+      target: fuseki
+    command: !reset []
     environment:
       ADMIN_PASSWORD: ${FUSEKI_ADMIN_PASSWORD:-change-me}
       ENABLE_DATA_WRITE: "true"
@@ -20,7 +22,6 @@ services:
     volumes: !override
       - ./data/store:/fuseki-base/databases
       - ./config.json:/config/config.json:ro
-      - ./fuseki/entrypoint.sh:/kgserve/entrypoint.sh:ro
 
   sync:
     environment:
